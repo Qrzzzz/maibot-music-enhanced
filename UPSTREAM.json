@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "prepared_on": "2026-10-27",
+  "maintainer": "Qrzzzz",
+  "license": "GPL-3.0-only",
+  "base": {
+    "repository": "https://github.com/pan-ice/maibot-music",
+    "version": "1.4.6",
+    "commit": "2d930f8ce54b725e1768012f3020fb1de3bf456d",
+    "license": "MIT",
+    "copyright": "Copyright (c) 2026 磐冰",
+    "files": [
+      {
+        "path": ".gitignore",
+        "git_blob_sha1": "45f89b0e7b69faefa8c9864dc1e9e7de977b1b21",
+        "sha256": "405da3cc7649508c5d1e5621fb576bfa796591ba567172b1c687a433d63a505c"
+      },
+      {
+        "path": "__init__.py",
+        "git_blob_sha1": "ed323d06da078d151182bfec5f6febb7fb7305d7",
+        "sha256": "5574384a553f95c31819d6d395ca2d18f60553f17e20472d6dcaae249acf0f08"
+      },
+      {
+        "path": "_manifest.json",
+        "git_blob_sha1": "3af6cd563ffeb3dc71023513b5b4849d024f1721",
+        "sha256": "348b3d240f190dbab9b7eeb9ccf8fd9c8368d737154a95890abd22390843f5cb"
+      },
+      {
+        "path": "audio_cache.py",
+        "git_blob_sha1": "728879373c99f1264e366c34055ae9c81a113215",
+        "sha256": "d7b0c6332ca68a1128f6afe5e88b72aa6dfc4d0c1a0f6df3ea371da7928ae829"
+      },
+      {
+        "path": "config.example.toml",
+        "git_blob_sha1": "b72f3391af88b9965a5443188749d7438428f3cc",
+        "sha256": "42580d11fd26dbc73552b11c1248e465eb2f269698414d9aab76fda297f6e14e"
+      },
+      {
+        "path": "error_log.py",
+        "git_blob_sha1": "585cd7d365ae34a6f4178e0bcf839580ca150b19",
+        "sha256": "2c543ac4e00a3f7ec6b4a9ba9119dc60c22156105c86ba2df5813b10564b4213"
+      },
+      {
+        "path": "LICENSE",
+        "git_blob_sha1": "b62d8a14840dd404a2f65b3360b024856b60b55f",
+        "sha256": "cf202e3ec461540fbf5ea1e0e6d8d8362461bb5390a4f7f8ab5b85403bc83277"
+      },
+      {
+        "path": "music_api.py",
+        "git_blob_sha1": "bfdc8aa31ad9102e128b655845776092953eb847",
+        "sha256": "88648a39b311b1b608a807e091ec5507f3932e29b617a2504c82755226021087"
+      },
+      {
+        "path": "plugin.py",
+        "git_blob_sha1": "543971861ae50d11124c8202806b7087a68be325",
+        "sha256": "0dfaf5f0ff41b3461b14e687e568fa0b60707579a5dc8dbeab0bdab3c55e29d6"
+      },
+      {
+        "path": "README.md",
+        "git_blob_sha1": "332960497d91d213b048fa47cdb513553f01f841",
+        "sha256": "b4cd5093c5d7b062c545fb1128c6a9e1df5e8dccf5291011f3ea68b5c900c34b"
+      },
+      {
+        "path": "tests/test_audio_cache.py",
+        "git_blob_sha1": "0ff7887c2a5c0b6d0e2003800444b5a25ffce342",
+        "sha256": "72174d1927e7a14a3c7c11c91784642b40ddc373723ec7091f4ffc250f2273de"
+      },
+      {
+        "path": "tests/test_music_api.py",
+        "git_blob_sha1": "39361e96b375fa5ca969c38afe79c39f508b4f1d",
+        "sha256": "4ee7bfb017ca70116a52766fd02ed4e8c9ef5e15b64b52bd0bbb500bd718e0e4"
+      },
+      {
+        "path": "tests/test_plugin_voice.py",
+        "git_blob_sha1": "3a9ce948bdfc413bc20c3c40050b9989272288f1",
+        "sha256": "d12e6f0490485fc58275a205519287928095804a7309a7c0eb880fafe6305b22"
+      },
+      {
+        "path": "url_parser.py",
+        "git_blob_sha1": "39462959735bebfe5799c1f37cd5868eb09c5b87",
+        "sha256": "e156991240dc20adde9519d1627832a1c5a79c959bb36a14ca926d40296f02b2"
+      }
+    ]
+  },
+  "protocol_reference": {
+    "repository": "https://github.com/Zhalslar/astrbot_plugin_music",
+    "version": "3.4.5",
+    "commit": "dc009ce778520e740baf35de4d90c4d778e5009b",
+    "file": "core/platform/txqq.py",
+    "license": "GPL-3.0",
+    "usage": "TXQQ HTTP request and response protocol reference; no AstrBot runtime dependency"
+  },
+  "modifications": [
+    "Source-aware QQ/NetEase search, recording matching, duration and identity verification, transcoding and cache integration",
+    "Independent plugin identity, portable default configuration, tests and release tooling"
+  ],
+  "distribution_note": "No user configuration, credentials, audio files, runtime logs or databases are included."
+}

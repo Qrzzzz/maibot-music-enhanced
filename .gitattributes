@@ -1,0 +1,7 @@
+* text=auto eol=lf
+*.zip binary
+# Preserve upstream license and test text, including original trailing blank lines.
+LICENSE whitespace=-blank-at-eof
+licenses/*.txt whitespace=-blank-at-eof
+tests/test_music_api.py whitespace=-blank-at-eof
+tests/test_plugin_voice.py whitespace=-blank-at-eof
