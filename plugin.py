@@ -6,12 +6,13 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import re
 import shutil
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import quote
 
 from maibot_sdk import Command, Field, HookHandler, MaiBotPlugin, PluginConfigBase, Tool
 from maibot_sdk.types import HookMode, ToolParameterInfo, ToolParamType
@@ -22,33 +23,7 @@ from .music_api import MusicAPIResponseError, SongInfo
 from .source_bridge import SourceAwareSearchClient as MusicSearchClient
 from .url_parser import extract_urls, parse_music_card_text, parse_music_url
 
-PLUGIN_VERSION = "1.0.0"
-
-
-# ===== QQ 音乐卡片直连 NapCat（绕过 MaiBot 适配器） =====
-
-# CQ 转义规则：url/audio 值内的 & = 原样保留，
-# 仅对展示文本（title/content）按 OneBot 规范转义 & , [ ]
-_CQ_TEXT_ESCAPES = {"&": "&amp;", ",": "&#44;", "[": "&#91;", "]": "&#93;"}
-
-
-def _cq_escape_text(value: str) -> str:
-    """按 OneBot 规范转义自定义音乐卡片的展示文本。"""
-    return "".join(_CQ_TEXT_ESCAPES.get(char, char) for char in value)
-
-
-def _build_qq_music_card_cq(payload: dict[str, str]) -> str:
-    """把 qq_music_card 的字段拼成 NapCat 可识别的自定义音乐卡片 CQ 码。
-
-    audio 为空时省略 audio 参数，生成可点击跳转的卡片。
-    """
-    parts = ["[CQ:music,type=custom", "url=" + payload["url"]]
-    if payload.get("audio"):
-        parts.append("audio=" + payload["audio"])
-    parts.append("title=" + _cq_escape_text(payload["title"]))
-    parts.append("image=" + payload["image"])
-    parts.append("content=" + _cq_escape_text(payload["content"]))
-    return ",".join(parts) + "]"
+PLUGIN_VERSION = "1.1.0"
 
 
 # ===== 配置模型 =====
@@ -96,7 +71,7 @@ class MusicConfig(PluginConfigBase):
         default="",
         description="MaiBot 缓存目录；留空使用本插件数据目录下的 audio_cache",
     )
-    cache_napcat_dir: str = Field(
+    cache_reader_dir: str = Field(
         default="",
         description="适配器读取缓存的路径；同机留空，容器部署填写同一目录的容器内路径",
     )
@@ -141,23 +116,6 @@ class QQMusicConfig(PluginConfigBase):
     )
 
 
-class NapCatConfig(PluginConfigBase):
-    """NapCat HTTP API 配置（解析音乐卡片原始数据、直连发送QQ音乐卡片）。"""
-
-    __ui_label__ = "NapCat"
-    __ui_icon__ = "server"
-    __ui_order__ = 4
-
-    http_url: str = Field(
-        default="http://127.0.0.1:9999",
-        description="NapCat HTTP API 地址（如 http://127.0.0.1:9999）",
-    )
-    http_token: str = Field(
-        default="",
-        description="NapCat HTTP API 访问令牌（留空则不鉴权）",
-    )
-
-
 class SourceBridgeConfig(PluginConfigBase):
     __ui_label__ = "完整音频音源"
     enabled: bool = Field(default=True, description="向 music.txqq.pro 发送点歌关键词；本地语音模式下载后校验完整时长并转为 MP3。关闭则使用原生平台接口")
@@ -170,7 +128,6 @@ class MusicPluginConfig(PluginConfigBase):
     music: MusicConfig = Field(default_factory=MusicConfig)
     netease: NeteaseConfig = Field(default_factory=NeteaseConfig)
     qq: QQMusicConfig = Field(default_factory=QQMusicConfig)
-    napcat: NapCatConfig = Field(default_factory=NapCatConfig)
     source_bridge: SourceBridgeConfig = Field(default_factory=SourceBridgeConfig)
 
 
@@ -200,8 +157,6 @@ class MusicPlugin(MaiBotPlugin):
         # key: stream_id（等于消息的 session_id）, value: (结果列表, 平台, 创建时间戳)
         self._pending_choices: dict[str, tuple[list[SongInfo], str, float]] = {}
         self._pending_lock = asyncio.Lock()
-        # QQ 直连 NapCat 的目标缓存: stream_id -> {"group_id": ...} 或 {"user_id": ...}
-        self._qq_direct_targets: dict[str, dict[str, str]] = {}
 
     def _clean_expired_pending(self) -> None:
         """清理已过期的待选状态。"""
@@ -209,6 +164,25 @@ class MusicPlugin(MaiBotPlugin):
         expired = [sid for sid, (_, _, ts) in self._pending_choices.items() if now - ts > _PENDING_TTL]
         for sid in expired:
             del self._pending_choices[sid]
+
+    def normalize_plugin_config(self, config_data: Mapping[str, Any] | None) -> tuple[dict[str, Any], bool]:
+        """Migrate old cache paths and discard obsolete client HTTP credentials."""
+        raw = dict(config_data) if isinstance(config_data, Mapping) else {}
+        changed = "napcat" in raw
+        raw.pop("napcat", None)
+        if isinstance(raw.get("music"), Mapping):
+            music = dict(raw["music"])
+            if "cache_napcat_dir" in music:
+                music.setdefault("cache_reader_dir", music.pop("cache_napcat_dir"))
+                changed = True
+            raw["music"] = music
+        if isinstance(raw.get("plugin", {}), Mapping):
+            plugin = dict(raw.get("plugin", {}))
+            changed = changed or plugin.get("config_version") != PLUGIN_VERSION
+            plugin["config_version"] = PLUGIN_VERSION
+            raw["plugin"] = plugin
+        normalized, updated = super().normalize_plugin_config(raw)
+        return normalized, changed or updated
 
     def _get_api(self) -> MusicSearchClient:
         """获取或创建 API 客户端。"""
@@ -229,8 +203,6 @@ class MusicPlugin(MaiBotPlugin):
                 thirdparty_enabled=self.config.source_bridge.enabled,
                 netease_cookie=netease_cookie,
                 qq_cookie=qq_cookie,
-                napcat_url=self.config.napcat.http_url,
-                napcat_token=self.config.napcat.http_token,
             )
         return self._api
 
@@ -255,7 +227,7 @@ class MusicPlugin(MaiBotPlugin):
             if self.config.music.cache_storage_dir.strip()
             else self.ctx.paths.data_dir / "audio_cache"
         )
-        reader_dir = self.config.music.cache_napcat_dir.strip() or str(storage_dir)
+        reader_dir = self.config.music.cache_reader_dir.strip() or str(storage_dir)
         audio_cache = MusicAudioCache(
             str(storage_dir),
             reader_dir,
@@ -360,208 +332,37 @@ class MusicPlugin(MaiBotPlugin):
         return "\n".join(lines)
 
     async def _send_music_card(self, song: SongInfo, stream_id: str, *, silent: bool = False) -> bool:
-        """以音乐卡片形式发送歌曲。
+        """Use Host-supported platform cards; otherwise send a public song link through Host.
 
-        网易云音乐：通过 NapCat 平台型 music 段发送，只需 song_id，
-        NapCat 负责从网易云拉取音频和卡片展示信息。
-        QQ音乐：插件自解析歌曲详情与可播放直链（musicu.fcg，优先 m4a、
-        回退 mp3，HEAD 校验），发送包含 url/audio/title/image/content 的
-        自定义 music 段（type=custom），不依赖 NapCat 对 QQ 歌曲 ID 的内部解析。
-
-        Args:
-            song: SongInfo 对象。
-            stream_id: 目标消息流 ID。
-            silent: 是否静默处理失败（不向用户发送提示文本）。
-
-        Returns:
-            是否成功发送卡片。
+        QQ search returns song MID, while native QQ cards require a numeric ID.
+        Custom CQ/music cards and direct client HTTP are intentionally unsupported.
         """
-        try:
-            if song.platform == "qq":
-                return await self._send_qq_music_card(song, stream_id, silent=silent)
-            sent = await self.ctx.send.custom(
-                "music",
-                {"type": song.platform, "id": song.song_id},
-                stream_id,
-            )
-        except Exception:
-            self.ctx.logger.exception("发送音乐卡片失败: %s %s", song.platform, song.song_id)
-            if not silent:
-                await self.ctx.send.text(song.display(), stream_id)
-            return False
-
-        if sent:
-            return True
-
-        self.ctx.logger.warning("音乐卡片发送失败: %s %s", song.platform, song.song_id)
-        if not silent:
-            await self.ctx.send.text(song.display(), stream_id)
-        return False
-
-    async def _send_qq_music_card(self, song: SongInfo, stream_id: str, *, silent: bool = False) -> bool:
-        """发送可播放的 QQ 音乐自定义卡片（元数据与直链由插件自解析）。
-
-        优先直连 NapCat HTTP API 发送（Plan B，绕过 MaiBot 适配器对 music
-        段的改写）：把 url/audio/title/image/content 拼成自定义音乐卡片
-        CQ 码发给 /send_group_msg 或 /send_private_msg。直连不可用（未配置
-        NapCat 地址/无法解析目标/请求失败）时回退到自定义 music 段
-        （type=custom）走 MaiBot 适配器。
-
-        Returns:
-            是否成功发送卡片。
-        """
-        api = self._get_api()
-        try:
-            payload = await api.qq_music_card(song)
-        except Exception:
-            self.ctx.logger.exception("解析QQ音乐卡片失败: %s %s", song.platform, song.song_id)
-            if not silent:
-                await self.ctx.send.text(self._qq_card_fallback_text(song), stream_id)
-            return False
-
-        if payload is None:
-            self.ctx.logger.warning(
-                "QQ音乐卡片信息不足，无法构卡: %s %s",
-                song.platform,
-                song.song_id,
-            )
-            if not silent:
-                await self.ctx.send.text(self._qq_card_fallback_text(song), stream_id)
-            return False
-
-        # audio 为空表示直链不可用，此时生成的卡片不带 audio（跳转卡）
-        jump_card = not payload.get("audio")
-
-        # 1. 优先直连 NapCat 发送自定义音乐卡片
-        target = await self._resolve_qq_direct_target(stream_id)
-        if target is not None:
-            cq_message = _build_qq_music_card_cq(payload)
+        del silent
+        numeric_id = song.song_id.isascii() and song.song_id.isdecimal()
+        if song.platform in {"qq", "163"} and numeric_id:
             try:
-                direct_ok, _ = await api.napcat_send_message(cq_message, **target)
+                if await self.ctx.send.custom("music", {"type": song.platform, "id": song.song_id}, stream_id):
+                    return True
             except Exception:
-                self.ctx.logger.exception(
-                    "QQ音乐卡片NapCat直连异常: %s %s",
-                    song.platform,
-                    song.song_id,
-                )
-                direct_ok = False
-            if direct_ok:
-                self.ctx.logger.info(
-                    "QQ音乐卡片已通过NapCat直连发送: %s %s target=%s",
-                    song.platform,
-                    song.song_id,
-                    next(iter(target)),
-                )
-                if jump_card and not silent:
-                    await self.ctx.send.text(
-                        "该歌曲受版权或登录限制无法直接播放，已发送可点击跳转的音乐卡片",
-                        stream_id,
-                    )
-                return True
-            self.ctx.logger.warning(
-                "QQ音乐卡片NapCat直连失败，回退适配器路径: %s %s",
-                song.platform,
-                song.song_id,
-            )
-
-        # 2. 回退：走 MaiBot 适配器自定义 music 段（部分适配器可透传 type=custom）
-        data = {key: value for key, value in payload.items() if value}
-        try:
-            sent = await self.ctx.send.custom("music", data, stream_id)
-        except Exception:
-            self.ctx.logger.exception("发送QQ音乐卡片失败: %s %s", song.platform, song.song_id)
-            if not silent:
-                await self.ctx.send.text(self._qq_card_fallback_text(song), stream_id)
+                self.ctx.logger.warning("平台音乐卡片不可用，改发歌曲链接: %s %s", song.platform, song.song_id)
+        link = self._public_song_url(song)
+        if not link:
             return False
-
-        if not sent:
-            self.ctx.logger.warning("QQ音乐卡片发送失败: %s %s", song.platform, song.song_id)
-            if not silent:
-                await self.ctx.send.text(self._qq_card_fallback_text(song), stream_id)
-            return False
-
-        if jump_card and not silent:
-            await self.ctx.send.text(
-                "该歌曲受版权或登录限制无法直接播放，已发送可点击跳转的音乐卡片",
-                stream_id,
-            )
-        return True
-
-    def _remember_qq_direct_target(self, stream_id: str, message: dict[str, Any] | None) -> None:
-        """从 Hook/Command 的 message 中记录 QQ 直连目标（群号或QQ号）。
-
-        message 的 schema 由 MaiBot Host 提供：platform 为 "qq" 时，
-        message_info.group_info.group_id 表示群聊、message_info.user_info.user_id
-        表示私聊发送者（即私聊目标）。
-        """
-        if not stream_id or not isinstance(message, dict):
-            return
-        if str(message.get("platform") or "") != "qq":
-            return
-        message_info = message.get("message_info")
-        if not isinstance(message_info, dict):
-            return
-        group_id = ""
-        group_info = message_info.get("group_info")
-        if isinstance(group_info, dict):
-            group_id = str(group_info.get("group_id") or "")
-        user_id = ""
-        user_info = message_info.get("user_info")
-        if isinstance(user_info, dict):
-            user_id = str(user_info.get("user_id") or "")
-        if group_id:
-            self._qq_direct_targets[stream_id] = {"group_id": group_id}
-        elif user_id:
-            self._qq_direct_targets[stream_id] = {"user_id": user_id}
-
-    async def _resolve_qq_direct_target(self, stream_id: str) -> dict[str, str] | None:
-        """解析当前聊天流对应的 QQ 直连目标。
-
-        优先使用消息链路里记录的目标缓存；未命中时通过
-        ctx.chat.get_all_streams(platform="qq") 按 stream_id 反查群号/QQ号
-        （覆盖 Tool 等拿不到 message 的触发场景）。
-        """
-        targets = getattr(self, "_qq_direct_targets", None)
-        if not isinstance(targets, dict):
-            targets = {}
-        cached = targets.get(stream_id)
-        if cached:
-            return cached
-        if not stream_id:
-            return None
         try:
-            chat = getattr(self.ctx, "chat", None)
-            if chat is None or not hasattr(chat, "get_all_streams"):
-                return None
-            streams = await chat.get_all_streams(platform="qq")
+            return bool(await self.ctx.send.text(f"{song.display() or '歌曲链接'}\n{link}", stream_id))
         except Exception:
-            return None
-        if not isinstance(streams, list):
-            return None
-        for stream in streams:
-            if not isinstance(stream, dict):
-                continue
-            if str(stream.get("stream_id") or stream.get("session_id") or "") != stream_id:
-                continue
-            group_id = str(stream.get("group_id") or "")
-            user_id = str(stream.get("user_id") or "")
-            if group_id:
-                target = {"group_id": group_id}
-            elif user_id:
-                target = {"user_id": user_id}
-            else:
-                continue
-            targets[stream_id] = target
-            return target
-        return None
+            self.ctx.logger.warning("歌曲链接发送失败: %s %s", song.platform, song.song_id)
+            return False
 
     @staticmethod
-    def _qq_card_fallback_text(song: SongInfo) -> str:
-        """QQ 音乐卡片无法生成/发送时的回退提示文本。"""
-        display = song.display().strip()
-        if display:
-            return f"「{display}」的QQ音乐卡片发送失败"
-        return "未能生成QQ音乐卡片，请稍后重试"
+    def _public_song_url(song: SongInfo) -> str:
+        song_id = quote(song.song_id, safe="")
+        if song.platform == "qq":
+            return f"https://y.qq.com/n/ryqq/songDetail/{song_id}"
+        if song.platform == "163":
+            return f"https://music.163.com/song?id={song_id}"
+        return ""
+
 
     async def _send_voice_audio(self, song: SongInfo, stream_id: str, *, silent: bool = False) -> bool:
         """获取歌曲音频并以语音消息发送。"""
@@ -575,7 +376,7 @@ class MusicPlugin(MaiBotPlugin):
                 if audio_cache is None:
                     raise RuntimeError("本地音乐缓存尚未初始化")
                 cache_path = await api.prepare_local_audio(song, audio_cache)
-                voice_reference = audio_cache.napcat_path(cache_path)
+                voice_reference = audio_cache.adapter_path(cache_path)
             else:
                 media_id = song.media_id
                 if song.platform == "qq" and not media_id:
@@ -593,7 +394,7 @@ class MusicPlugin(MaiBotPlugin):
                     if audio_cache is None:
                         raise RuntimeError("本地音乐缓存尚未初始化")
                     cache_path = await audio_cache.get_or_download(song.platform, song.song_id, audio_url)
-                    voice_reference = audio_cache.napcat_path(cache_path)
+                    voice_reference = audio_cache.adapter_path(cache_path)
 
             sent = await self.ctx.send.custom(
                 "voiceurl",
@@ -766,7 +567,6 @@ class MusicPlugin(MaiBotPlugin):
         与命令不同，Tool 调用时直接播放最佳匹配，不走"列出候选→用户选歌"流程。
         默认平台播放失败时自动换另一个平台重试，多首候选逐个尝试。
         """
-        self._remember_qq_direct_target(stream_id, kwargs.get("message"))
         del kwargs
         _TOOL_NAME = "search_and_play_music"
 
@@ -809,7 +609,8 @@ class MusicPlugin(MaiBotPlugin):
             for song in results:
                 sent = await self._send_song(song, stream_id, silent=True)
                 if sent:
-                    return {"name": _TOOL_NAME, "content": f"已播放: {song.display()}"}
+                    kind = "已发送语音" if self.config.music.play_mode == "voice" else "已发送歌曲卡片或链接"
+                    return {"name": _TOOL_NAME, "content": f"{kind}: {song.display()}"}
 
         return {
             "name": _TOOL_NAME,
@@ -828,7 +629,6 @@ class MusicPlugin(MaiBotPlugin):
     )
     async def handle_music_command(self, stream_id: str = "", **kwargs: Any) -> tuple[bool, str, bool]:
         """处理点歌命令。"""
-        self._remember_qq_direct_target(stream_id, kwargs.get("message"))
         matched_groups = kwargs.get("matched_groups")
         if not isinstance(matched_groups, dict):
             matched_groups = {}
@@ -868,7 +668,6 @@ class MusicPlugin(MaiBotPlugin):
     )
     async def handle_select_command(self, stream_id: str = "", **kwargs: Any) -> tuple[bool, str, bool]:
         """处理选歌命令。"""
-        self._remember_qq_direct_target(stream_id, kwargs.get("message"))
         matched_groups = kwargs.get("matched_groups")
         if not isinstance(matched_groups, dict):
             matched_groups = {}
@@ -921,101 +720,6 @@ class MusicPlugin(MaiBotPlugin):
 
     # ===== EventHandler 组件 =====
 
-    async def _resolve_music_card_from_raw(
-        self,
-        message: dict[str, Any],
-    ) -> tuple[str, str] | None:
-        """通过 NapCat HTTP API 获取原始消息，从 json 段解析音乐卡片的 jumpUrl。
-
-        适配器将音乐卡片转成纯文本后会丢失歌曲 ID 等结构化数据。
-        此方法直接调 NapCat 的 get_msg HTTP API 获取原始消息，
-        从 json 段中提取 jumpUrl，精确解析出 (platform, song_id)。
-
-        Args:
-            message: MessageDict 对象。
-
-        Returns:
-            (platform, song_id) 元组，解析失败返回 None。
-        """
-        message_id = str(message.get("message_id", "")).strip()
-        if not message_id:
-            return None
-
-        # message_id 必须是纯数字才能传给 NapCat API
-        try:
-            int_message_id = int(message_id)
-        except ValueError:
-            self.ctx.logger.debug("message_id 非数字，跳过原始消息解析: %s", message_id)
-            return None
-
-        api = self._get_api()
-        data = await api.get_raw_message(int_message_id)
-        if not data:
-            return None
-
-        # 原始消息中的 message 段列表
-        raw_segments = data.get("message", [])
-        if not isinstance(raw_segments, list):
-            return None
-
-        for segment in raw_segments:
-            if not isinstance(segment, dict):
-                continue
-            if segment.get("type") != "json":
-                continue
-
-            segment_data = segment.get("data", {})
-            json_str = str(segment_data.get("data") or "").strip() if isinstance(segment_data, dict) else ""
-            if not json_str:
-                continue
-
-            try:
-                parsed = json.loads(json_str)
-            except Exception:
-                continue
-
-            if not isinstance(parsed, dict):
-                continue
-
-            app_name = str(parsed.get("app") or "").strip()
-            meta = parsed.get("meta", {})
-            if not isinstance(meta, dict):
-                continue
-
-            # 音乐卡片 — com.tencent.music.lua / com.tencent.structmsg
-            if app_name in {"com.tencent.music.lua", "com.tencent.structmsg"}:
-                # 优先 meta.music，其次 meta.news
-                music_meta = meta.get("music", {})
-                if not isinstance(music_meta, dict) or not music_meta:
-                    music_meta = meta.get("news", {})
-                if isinstance(music_meta, dict) and music_meta:
-                    jump_url = str(music_meta.get("jumpUrl") or "").strip()
-                    if jump_url:
-                        # 网易云短链需要先解析重定向
-                        if "163cn.tv" in jump_url:
-                            resolved_url = await api.resolve_short_url(jump_url)
-                            if resolved_url:
-                                jump_url = resolved_url
-                        result = parse_music_url(jump_url)
-                        if result:
-                            return result
-
-            # 音乐小程序 — com.tencent.miniapp_01
-            if app_name == "com.tencent.miniapp_01":
-                detail = meta.get("detail_1", {})
-                if isinstance(detail, dict):
-                    qqdocurl = str(detail.get("qqdocurl") or "").strip()
-                    miniapp_title = str(detail.get("title") or "").strip()
-                    if qqdocurl and miniapp_title in ("QQ音乐", "网易云音乐"):
-                        if "163cn.tv" in qqdocurl:
-                            resolved_url = await api.resolve_short_url(qqdocurl)
-                            if resolved_url:
-                                qqdocurl = resolved_url
-                        result = parse_music_url(qqdocurl)
-                        if result:
-                            return result
-
-        return None
 
     @HookHandler(
         "chat.receive.after_process",
@@ -1026,178 +730,53 @@ class MusicPlugin(MaiBotPlugin):
         timeout_ms=15000,
     )
     async def handle_music_url_parse(self, **kwargs: Any) -> dict[str, Any]:
-        """解析消息中的音乐链接和音乐分享卡片，发送音乐卡片和语音。
-
-        Returns:
-            dict: Hook 返回值。aborted=True 时阻止消息进入聊天流程。
-        """
+        """Parse only Host-provided message content; never fetch raw messages from a client."""
         message = kwargs.get("message")
-        if not message:
-            return {"action": "continue"}
-
-        # 提取消息文本和 session_id
-        # SDK 保证 message 为 dict，非 dict 的情况不做处理
         if not isinstance(message, dict):
             return {"action": "continue"}
-
-        text = message.get("processed_plain_text") or ""
-        session_id = str(message.get("session_id", ""))
-        message_id = str(message.get("message_id", ""))
+        session_id = str(message.get("session_id") or "")
+        text = str(message.get("processed_plain_text") or "")
         if not text:
-            raw_msg = message.get("raw_message", [])
-            if isinstance(raw_msg, list):
-                text = " ".join(
-                    str(seg.get("data", "")) if isinstance(seg, dict) and seg.get("type") == "text" else ""
-                    for seg in raw_msg
-                ).strip()
-
+            parts = []
+            for segment in message.get("raw_message", []) if isinstance(message.get("raw_message"), list) else []:
+                if not isinstance(segment, dict) or segment.get("type") != "text":
+                    continue
+                data = segment.get("data", "")
+                parts.append(str(data.get("text") or "") if isinstance(data, dict) else str(data))
+            text = " ".join(parts).strip()
         if not text or not session_id:
             return {"action": "continue"}
-
-        # 记录 QQ 会话目标，供直连 NapCat 发送音乐卡片使用
-        self._remember_qq_direct_target(session_id, message)
-
-        # ── 1. 音乐卡片解析 ──
-        if self.config.music.auto_parse_card:
-            card_info = parse_music_card_text(text)
-            if card_info and card_info.query:
-                # 优先通过 get_msg API 从原始消息中精确解析歌曲 ID
-                card_result = None
-                if message_id:
-                    card_result = await self._resolve_music_card_from_raw(message)
-
-                # 其次从分享文本中的 URL 精确解析歌曲 ID
-                # card_info.url 来自 parse_music_card_text 对分享文本的提取，
-                # 对于网易云短链接，card_info.url 就是短链接本身
-                if not card_result and card_info.url:
-                    url_result = parse_music_url(card_info.url)
-                    if url_result:
-                        platform, song_id = url_result
-                        # 网易云短链接需要重定向解析
-                        if platform == "163_short":
-                            api = self._get_api()
-                            resolved_url = await api.resolve_short_url(card_info.url)
-                            if resolved_url:
-                                short_result = parse_music_url(resolved_url)
-                                if short_result and short_result[0] != "163_short":
-                                    platform, song_id = short_result
-                                    card_result = (platform, song_id)
-                        else:
-                            card_result = url_result
-
-                if card_result and card_result[0] not in ("163_short", "qq_short"):
-                    platform, song_id = card_result
-                    sent = await self._send_song(
-                        SongInfo(
-                            song_id=song_id,
-                            name=card_info.song_name,
-                            artists=card_info.artist,
-                            album="",
-                            platform=platform,
-                        ),
-                        session_id,
-                    )
-                    self.ctx.logger.info(
-                        "已解析音乐卡片(精确): %s → %s %s",
-                        card_info.query,
-                        platform,
-                        song_id,
-                    )
-                    return {"action": "abort" if sent else "continue"}
-
-                # 精确解析失败，检查文本中是否有音乐 URL 可供步骤2处理
-                urls_in_text = extract_urls(text)
-                has_music_link = any(
-                    parse_music_url(u) is not None for u in urls_in_text
-                )
-                if has_music_link and self.config.music.auto_parse_url:
-                    # 有音乐链接且 URL 解析已开启，跳到步骤2处理
-                    pass
-                else:
-                    # 无音乐链接或 URL 解析已关闭，用歌名+歌手搜索
-                    platform = card_info.platform or self._resolve_platform("")
-                    api = self._get_api()
-                    try:
-                        results = await api.search(card_info.query, platform, limit=1)
-                    except MusicAPIResponseError as exc:
-                        self.ctx.logger.error("音乐卡片搜索失败: %s", exc)
-                        if self._error_log is not None:
-                            self._error_log.error(
-                                "音乐卡片搜索失败(%s): %s",
-                                platform,
-                                exc.diagnostic_message(),
-                            )
-                        results = []
-                    except Exception as exc:
-                        self.ctx.logger.exception("音乐卡片搜索异常: %s", card_info.query)
-                        if self._error_log is not None:
-                            self._error_log.exception(
-                                "音乐卡片搜索异常: platform=%s query=%r error=%r",
-                                platform,
-                                card_info.query,
-                                exc,
-                            )
-                        results = []
-
-                    if results:
-                        sent = await self._send_song(results[0], session_id)
-                        self.ctx.logger.info(
-                            "已解析音乐卡片(搜索): %s → %s",
-                            card_info.query,
-                            results[0].display(),
-                        )
-                        return {"action": "abort" if sent else "continue"}
-                    else:
-                        self.ctx.logger.info("音乐卡片搜索无结果: %s", card_info.query)
-                        return {"action": "continue"}
-
-        # ── 2. URL 解析 ──
-        if not self.config.music.auto_parse_url:
+        card = parse_music_card_text(text) if self.config.music.auto_parse_card else None
+        if not self.config.music.auto_parse_url and card is None:
             return {"action": "continue"}
-
-        # 查找文本中的 URL
-        urls = extract_urls(text)
-        if not urls:
-            return {"action": "continue"}
-
-        # 尝试解析每个 URL
+        urls = list(dict.fromkeys(([card.url] if card and card.url else []) + extract_urls(text)))
         for url in urls:
-            result = parse_music_url(url)
-            if result is None:
+            parsed = parse_music_url(url)
+            if not parsed:
                 continue
-
-            platform, song_id = result
-
-            # 处理短链接（163cn.tv / c6.y.qq.com）— 需重定向解析
-            if platform in ("163_short", "qq_short"):
-                api = self._get_api()
-                resolved_url = await api.resolve_short_url(url)
-                if resolved_url:
-                    short_result = parse_music_url(resolved_url)
-                    if short_result and short_result[0] not in ("163_short", "qq_short"):
-                        platform, song_id = short_result
-                    else:
+            platform, song_id = parsed
+            api = self._get_api()
+            try:
+                if platform in {"163_short", "qq_short"}:
+                    resolved = await api.resolve_short_url(url)
+                    parsed = parse_music_url(resolved) if resolved else None
+                    if not parsed or parsed[0] in {"163_short", "qq_short"}:
                         continue
-                else:
+                    platform, song_id = parsed
+                song = await api.get_song_detail(song_id, platform)
+                if song is None:
                     continue
-
-            # 发送语音音频（_send_song 内部会补查 QQ 音乐 media_id）
-            sent = await self._send_song(
-                SongInfo(
-                    song_id=song_id,
-                    name="",
-                    artists="",
-                    album="",
-                    platform=platform,
-                ),
-                session_id,
-            )
-            self.ctx.logger.info("已解析音乐链接: %s %s", platform, song_id)
-
-            # 只处理第一个匹配的音乐链接，发送成功时拦截消息
-            return {"action": "abort" if sent else "continue"}
-
-        # 未匹配到任何音乐链接/卡片，不拦截
+                sent = await self._send_song(song, session_id)
+                return {"action": "abort" if sent else "continue"}
+            except Exception as exc:
+                self.ctx.logger.warning("分享歌曲解析失败: platform=%s error=%s", platform, type(exc).__name__)
+                return {"action": "continue"}
+        if card is not None:
+            try:
+                sent = await self.ctx.send.text("这张音乐分享没有可解析的歌曲链接，请补发 QQ 音乐或网易云歌曲链接。", session_id)
+                return {"action": "abort" if sent else "continue"}
+            except Exception:
+                self.ctx.logger.warning("补充歌曲链接提示发送失败")
         return {"action": "continue"}
 
 

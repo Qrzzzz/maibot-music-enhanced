@@ -5,13 +5,17 @@ import importlib.util
 import os
 import sys
 import time
+import types
 from pathlib import Path
 
 import httpx
 import pytest
 
 _MODULE_PATH = Path(__file__).parents[1] / "audio_cache.py"
-_SPEC = importlib.util.spec_from_file_location("maibot_music_audio_cache", _MODULE_PATH)
+_PACKAGE = types.ModuleType("music_cache_tests")
+_PACKAGE.__path__ = [str(_MODULE_PATH.parent)]
+sys.modules[_PACKAGE.__name__] = _PACKAGE
+_SPEC = importlib.util.spec_from_file_location(_PACKAGE.__name__ + ".audio_cache", _MODULE_PATH)
 assert _SPEC is not None and _SPEC.loader is not None
 _MODULE = importlib.util.module_from_spec(_SPEC)
 sys.modules[_SPEC.name] = _MODULE
@@ -53,10 +57,10 @@ async def test_downloads_mp3_and_reuses_cache(tmp_path: Path) -> None:
     cache = _build_cache(tmp_path, httpx.MockTransport(handler))
     await cache.initialize()
 
-    first_path = await cache.get_or_download("163", "123", "https://example.test/song.mp3")
+    first_path = await cache.get_or_download("163", "123", "https://aqqmusic.tc.qq.com/song.mp3")
     await cache.release(first_path)
     first_mtime = first_path.stat().st_mtime
-    await cache.get_or_download("163", "123", "https://example.test/song.mp3")
+    await cache.get_or_download("163", "123", "https://aqqmusic.tc.qq.com/song.mp3")
 
     assert request_count == 1
     assert first_path.read_bytes() == _MP3_DATA
@@ -94,7 +98,7 @@ async def test_download_uses_fixed_platform_headers(
 
     cache = _build_cache(tmp_path, httpx.MockTransport(handler))
     await cache.initialize()
-    cache_path = await cache.get_or_download(platform, "123", "https://example.test/song.mp3")
+    cache_path = await cache.get_or_download(platform, "123", "https://aqqmusic.tc.qq.com/song.mp3")
 
     assert captured_request is not None
     assert (
@@ -122,7 +126,7 @@ async def test_rejects_non_mp3_response(tmp_path: Path) -> None:
     await cache.initialize()
 
     with pytest.raises(AudioCacheError, match="不是 MP3"):
-        await cache.get_or_download("qq", "abc", "https://example.test/song.flac")
+        await cache.get_or_download("qq", "abc", "https://aqqmusic.tc.qq.com/song.flac")
 
     assert list(tmp_path.iterdir()) == []
     await cache.close()
@@ -146,7 +150,7 @@ async def test_rejects_oversized_download(tmp_path: Path) -> None:
     await cache.initialize()
 
     with pytest.raises(AudioCacheError, match="大小限制"):
-        await cache.get_or_download("163", "123", "https://example.test/song.mp3")
+        await cache.get_or_download("163", "123", "https://aqqmusic.tc.qq.com/song.mp3")
 
     assert list(tmp_path.iterdir()) == []
     await cache.close()
@@ -212,8 +216,8 @@ async def test_concurrent_references_keep_file_protected(tmp_path: Path) -> None
     cache = _build_cache(tmp_path, transport, expire_seconds=1)
     await cache.initialize()
 
-    first_path = await cache.get_or_download("163", "123", "https://example.test/song.mp3")
-    second_path = await cache.get_or_download("163", "123", "https://example.test/song.mp3")
+    first_path = await cache.get_or_download("163", "123", "https://aqqmusic.tc.qq.com/song.mp3")
+    second_path = await cache.get_or_download("163", "123", "https://aqqmusic.tc.qq.com/song.mp3")
     old_time = time.time() - 10
     os.utime(first_path, (old_time, old_time))
 
@@ -246,7 +250,7 @@ async def test_symlink_is_not_used_as_cache_file(tmp_path: Path) -> None:
 
     cache = _build_cache(tmp_path, httpx.MockTransport(handler))
     await cache.initialize()
-    cache_path = await cache.get_or_download("163", "123", "https://example.test/song.mp3")
+    cache_path = await cache.get_or_download("163", "123", "https://aqqmusic.tc.qq.com/song.mp3")
 
     assert request_count == 1
     assert not cache_path.is_symlink()
@@ -278,7 +282,7 @@ async def test_cancelled_download_cleans_state_and_temp_file(tmp_path: Path) -> 
     cache = _build_cache(tmp_path, httpx.MockTransport(handler))
     await cache.initialize()
     task = asyncio.create_task(
-        cache.get_or_download("163", "123", "https://example.test/song.mp3")
+        cache.get_or_download("163", "123", "https://aqqmusic.tc.qq.com/song.mp3")
     )
     await started.wait()
     task.cancel()

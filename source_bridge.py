@@ -19,12 +19,13 @@ import shutil
 import tempfile
 from difflib import SequenceMatcher
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin
 from weakref import WeakValueDictionary
 
 import httpx
 
 from .audio_cache import AudioCacheError, MusicAudioCache
+from .media_urls import allowed_media_url as _allowed_media_url
 from .music_api import MusicAPIResponseError, MusicSearchClient, SongInfo
 
 logger = logging.getLogger(__name__)
@@ -61,16 +62,6 @@ def _matches_request(query: str, title: str, artists: str) -> bool:
     return not remainder or remainder in actual or (bool(actual) and actual in remainder)
 
 
-def _allowed_media_url(url: str) -> bool:
-    try:
-        p = urlparse(url)
-        host = (p.hostname or '').lower()
-        return (p.scheme in {'http', 'https'} and not p.username and not p.password
-                and p.port in {None, 80, 443}
-                and (host.endswith('.qq.com') or host.endswith('.music.126.net')
-                     or host in {'music.163.com', 'interface.music.163.com'}))
-    except ValueError:
-        return False
 
 
 def _check_duration(actual: float, expected: float) -> None:
@@ -180,6 +171,32 @@ class SourceAwareSearchClient(MusicSearchClient):
             return self._media_urls[(platform, song_id)]
         return await super().get_song_url(song_id, platform, media_id, mp3_only=mp3_only)
 
+    async def get_song_detail(self, song_id: str, platform: str) -> SongInfo | None:
+        """Resolve a Host-provided link using platform metadata, not a client get_msg API."""
+        if platform == 'qq':
+            song = await self.get_qq_song_detail(song_id)
+        elif platform == '163' and song_id.isascii() and song_id.isdecimal():
+            response = await self._netease_client.get('https://music.163.com/api/song/detail',
+                params={'id': song_id, 'ids': json.dumps([int(song_id)])})
+            response.raise_for_status()
+            tracks = response.json().get('songs', [])
+            if not tracks:
+                return None
+            track = tracks[0]
+            artists = ','.join(str(item.get('name') or '') for item in track.get('artists', track.get('ar', [])))
+            song = SongInfo(str(track.get('id') or ''), str(track.get('name') or ''), artists,
+                            str(track.get('album', track.get('al', {})).get('name') or ''), '163')
+        else:
+            return None
+        if song is None or song.song_id != song_id or not song.name:
+            raise MusicAPIResponseError('分享链接与平台返回的歌曲信息不符')
+        if self.thirdparty_enabled:
+            try:
+                await self._search_public(f'{song.name} {song.artists}', platform, 10)
+            except Exception as exc:
+                logger.warning('分享音源回退原平台: error=%s', type(exc).__name__)
+        return song
+
     async def _expected_duration(self, song: SongInfo) -> float:
         if song.platform == 'qq':
             response = await self._qq_client.post('https://u.y.qq.com/cgi-bin/musicu.fcg', json={
@@ -213,7 +230,7 @@ class SourceAwareSearchClient(MusicSearchClient):
         for _ in range(6):
             if not _allowed_media_url(url):
                 raise AudioCacheError('音频地址不在 QQ/网易云媒体域名内')
-            async with self._public_client.stream('GET', url, headers={'Referer': referer}) as response:
+            async with self._public_client.stream('GET', url, headers={'Referer': referer}, follow_redirects=False) as response:
                 if response.is_redirect:
                     url = urljoin(url, response.headers.get('location', ''))
                     continue

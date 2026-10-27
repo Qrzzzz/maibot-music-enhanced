@@ -157,3 +157,43 @@ async def test_truncated_audio_is_not_cached_or_sent(tmp_path, m4a_file):
     finally:
         await cache.close()
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_share_detail_uses_canonical_metadata_and_primes_only_public_search():
+    client = bridge.SourceAwareSearchClient(thirdparty_enabled=True)
+    client._netease_client.get = AsyncMock(return_value=httpx.Response(200,
+        request=httpx.Request('GET', 'https://music.163.com/api/song/detail'),
+        json={'songs': [{'id': 123, 'name': 'Canonical', 'artists': [{'name': 'Artist'}], 'album': {'name': 'Album'}}]}))
+    client._search_public = AsyncMock(return_value=[])
+    try:
+        song = await client.get_song_detail('123', '163')
+        assert (song.song_id, song.name, song.artists) == ('123', 'Canonical', 'Artist')
+        client._search_public.assert_awaited_once_with('Canonical Artist', '163', 10)
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_share_detail_does_not_accept_a_different_song_id():
+    client = bridge.SourceAwareSearchClient(thirdparty_enabled=True)
+    client.get_qq_song_detail = AsyncMock(return_value=bridge.SongInfo('other', 'Song', 'Artist', '', 'qq'))
+    client._search_public = AsyncMock()
+    try:
+        with pytest.raises(bridge.MusicAPIResponseError, match='不符'):
+            await client.get_song_detail('wanted', 'qq')
+        client._search_public.assert_not_awaited()
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_share_detail_keeps_canonical_song_if_aggregator_fails():
+    client = bridge.SourceAwareSearchClient(thirdparty_enabled=True)
+    song = bridge.SongInfo('wanted', 'Song', 'Artist', '', 'qq')
+    client.get_qq_song_detail = AsyncMock(return_value=song)
+    client._search_public = AsyncMock(side_effect=httpx.ConnectError('unavailable'))
+    try:
+        assert await client.get_song_detail('wanted', 'qq') is song
+    finally:
+        await client.close()

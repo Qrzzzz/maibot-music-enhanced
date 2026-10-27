@@ -1,0 +1,38 @@
+[
+  {
+    "name": "napcat",
+    "repository": "https://github.com/Mai-with-u/MaiBot-Napcat-Adapter",
+    "commit": "d87203e2eff1835895ee34196b17a571dc6bbe24",
+    "source_path": "codecs/outbound/segment_encoder.py",
+    "git_blob_sha1": "b2c92ae64bd578cf819d19fd7810d81d82d8a294",
+    "source_sha256": "489a0b1785387415c19aa910bc25e819a2d273abf39863dd6fec7a673bf85f84",
+    "fixture_sha256": "e62916313d17dcd507122bcdd1a7940502ff42f3f83e8e3009e19b9cb3fb2d0a",
+    "license": "GPL-v3.0-or-later",
+    "license_declaration_blob": "5bea6d80310819dffb9655dbf403d71cdc27e00d",
+    "methods": [
+      "_build_music_segment",
+      "_build_music_segments",
+      "_build_url_media_segment",
+      "_build_voiceurl_segments",
+      "_normalize_file_reference"
+    ]
+  },
+  {
+    "name": "unified",
+    "repository": "https://github.com/Mai-with-u/MaiBot-SnowLuma-Adapter",
+    "commit": "ab751ae5c11f501e0158e33cacc321b33e34ef0c",
+    "source_path": "codecs/outbound/segment_encoder.py",
+    "git_blob_sha1": "4c3dad88c8ee5ab98e66b5485b1bcf777b3be805",
+    "source_sha256": "f4284c9f473f2c9dd7a01f8e02fb35b82040908eeba3368bdc9902bab38dd034",
+    "fixture_sha256": "5919f612fe72efcca288a981e4ee23bd1da5bc113cad422d18562a80dbdd07fd",
+    "license": "GPL-v3.0-or-later",
+    "license_declaration_blob": "1dab3b4276b519029b5202dd2dd31904f3ae6e3a",
+    "methods": [
+      "_build_music_segment",
+      "_build_music_segments",
+      "_build_url_media_segment",
+      "_build_voiceurl_segments",
+      "_normalize_file_reference"
+    ]
+  }
+]

@@ -1,7 +1,7 @@
 # 首次安装复制为 config.toml；也可让 MaiBot 根据配置模型生成默认配置。
 [plugin]
 enabled = true
-config_version = "1.0.0"
+config_version = "1.1.0"
 
 [music]
 default_platform = "qq"       # QQ 优先，LLM 工具失败时换网易云
@@ -13,7 +13,7 @@ auto_select_first = true       # /点歌 直接选择最佳候选；LLM 工具�
 play_mode = "voice"            # voice / card
 voice_source = "local"         # local / remote；完整时长校验只在 local 模式生效
 cache_storage_dir = ""        # 留空：本插件数据目录/audio_cache
-cache_napcat_dir = ""         # 同机留空；Docker 填适配器可见的同一缓存目录
+cache_reader_dir = ""         # 同机留空；NapCat / SnowLuma 填各自可读的同一缓存目录
 cache_max_size_mb = 1024
 cache_expire_hours = 24
 cache_cleanup_interval_hours = 24
@@ -30,7 +30,3 @@ csrf_token = ""
 [qq]
 uin = ""                      # 原生 QQ 搜索回退需要；聚合源搜索不使用账号 Cookie
 qqmusic_key = ""
-
-[napcat]
-http_url = "http://127.0.0.1:9999"  # 仅卡片直连/原始消息解析等 NapCat 功能需要
-http_token = ""

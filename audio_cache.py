@@ -9,8 +9,11 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from urllib.parse import urljoin
 
 import httpx
+
+from .media_urls import allowed_media_url
 
 _MP3_CONTENT_TYPES = frozenset({
     "audio/mpeg",
@@ -61,7 +64,7 @@ class MusicAudioCache:
     def __init__(
         self,
         storage_dir: str,
-        napcat_dir: str,
+        reader_dir: str,
         *,
         max_size_bytes: int,
         expire_seconds: int,
@@ -70,7 +73,7 @@ class MusicAudioCache:
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self.storage_dir = Path(storage_dir).expanduser().resolve()
-        self.napcat_dir = napcat_dir.rstrip("/\\")
+        self.reader_dir = reader_dir.rstrip("/\\").replace("\\", "/")
         self.max_size_bytes = max_size_bytes
         self.expire_seconds = expire_seconds
         self.max_file_size_bytes = max_file_size_bytes
@@ -79,7 +82,7 @@ class MusicAudioCache:
         self._active_paths: dict[Path, int] = {}
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(
-            follow_redirects=True,
+            follow_redirects=False,
             timeout=httpx.Timeout(download_timeout_seconds),
         )
 
@@ -149,9 +152,13 @@ class MusicAudioCache:
             else:
                 self._active_paths[cache_key] = reference_count - 1
 
+    def adapter_path(self, cache_path: Path) -> str:
+        """Convert a cache file to the path visible to the selected client."""
+        return str(PurePosixPath(self.reader_dir) / cache_path.name)
+
     def napcat_path(self, cache_path: Path) -> str:
-        """将缓存文件转换为 NapCat 进程可见的路径。"""
-        return str(PurePosixPath(self.napcat_dir) / cache_path.name)
+        """Legacy Python helper alias; performs no client API call."""
+        return self.adapter_path(cache_path)
 
     async def cleanup(self) -> None:
         """删除过期缓存、残留临时文件，并执行容量淘汰。"""
@@ -174,36 +181,38 @@ class MusicAudioCache:
         temp_path = target_path.with_suffix(".mp3.part")
         await asyncio.to_thread(temp_path.unlink, missing_ok=True)
         headers = _AUDIO_DOWNLOAD_HEADERS.get(platform, {})
-
         try:
-            async with self._client.stream("GET", audio_url, headers=headers) as response:
-                response.raise_for_status()
-                content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
-                if content_type and content_type not in _MP3_CONTENT_TYPES:
-                    raise AudioCacheError(f"音频响应不是 MP3: {content_type}")
-
-                content_length = response.headers.get("content-length")
-                if content_length:
-                    try:
-                        declared_size = int(content_length)
-                    except ValueError as exc:
-                        raise AudioCacheError("音频响应的 Content-Length 无效") from exc
-                    if declared_size > self.max_file_size_bytes:
-                        raise AudioCacheError("音频文件超过缓存单文件大小限制")
-
-                total_size = 0
-                with temp_path.open("wb") as file:
-                    async for chunk in response.aiter_bytes(64 * 1024):
-                        if not chunk:
-                            continue
-                        total_size += len(chunk)
-                        if total_size > self.max_file_size_bytes:
+            for _ in range(6):
+                if not allowed_media_url(audio_url):
+                    raise AudioCacheError("音频地址不在 QQ/网易云媒体域名内")
+                async with self._client.stream("GET", audio_url, headers=headers, follow_redirects=False) as response:
+                    if response.is_redirect:
+                        audio_url = urljoin(audio_url, response.headers.get("location", ""))
+                        continue
+                    response.raise_for_status()
+                    content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+                    if content_type and content_type not in _MP3_CONTENT_TYPES:
+                        raise AudioCacheError(f"音频响应不是 MP3: {content_type}")
+                    content_length = response.headers.get("content-length")
+                    if content_length:
+                        try:
+                            declared_size = int(content_length)
+                        except ValueError as exc:
+                            raise AudioCacheError("音频响应的 Content-Length 无效") from exc
+                        if declared_size > self.max_file_size_bytes:
                             raise AudioCacheError("音频文件超过缓存单文件大小限制")
-                        file.write(chunk)
-
+                    total_size = 0
+                    with temp_path.open("wb") as file:
+                        async for chunk in response.aiter_bytes(64 * 1024):
+                            total_size += len(chunk)
+                            if total_size > self.max_file_size_bytes:
+                                raise AudioCacheError("音频文件超过缓存单文件大小限制")
+                            file.write(chunk)
+                break
+            else:
+                raise AudioCacheError("音频重定向次数过多")
             if total_size == 0 or not await asyncio.to_thread(self._is_valid_cache_file, temp_path):
                 raise AudioCacheError("下载内容不是有效的 MP3 文件")
-
             await asyncio.to_thread(temp_path.replace, target_path)
         except BaseException:
             await asyncio.to_thread(temp_path.unlink, missing_ok=True)

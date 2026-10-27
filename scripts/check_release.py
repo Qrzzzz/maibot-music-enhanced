@@ -25,6 +25,10 @@ REQUIRED = (
     "scripts/check_release.py", "scripts/build_release.py", "scripts/check_host.py",
     "tests/test_source_bridge.py", "tests/test_distribution.py",
     "scripts/release.py", "scripts/prepare_release.py", ".github/workflows/release.yml",
+    "media_urls.py",
+    "tests/test_host_routing.py", "tests/fixtures/adapters/provenance.json",
+    "tests/fixtures/adapters/napcat_encoder.py", "tests/fixtures/adapters/unified_encoder.py",
+    "docs/COMPATIBILITY.md",
 )
 FORBIDDEN_PARTS = {".git", ".venv", "venv", "__pycache__", ".pytest_cache", "data", "logs", "dist", "build"}
 FORBIDDEN_SUFFIXES = {".pyc", ".pyo", ".log", ".db", ".sqlite", ".sqlite3", ".mp3", ".m4a", ".flac", ".part", ".pem", ".key"}
@@ -60,8 +64,9 @@ def check_tree(root: Path) -> dict:
                      (root / "CHANGELOG.md").read_text(encoding="utf-8"), re.MULTILINE), "Missing versioned changelog"
     assert config["source_bridge"]["enabled"] and config["music"]["play_mode"] == "voice"
     assert config["music"]["voice_source"] == "local"
-    assert config["music"]["cache_storage_dir"] == config["music"]["cache_napcat_dir"] == ""
-    for section, fields in {"netease": ("MUSIC_U", "csrf_token"), "qq": ("uin", "qqmusic_key"), "napcat": ("http_token",)}.items():
+    assert config["music"]["cache_storage_dir"] == config["music"]["cache_reader_dir"] == ""
+    assert "napcat" not in config, "Obsolete client HTTP configuration must not be distributed"
+    for section, fields in {"netease": ("MUSIC_U", "csrf_token"), "qq": ("uin", "qqmusic_key",)}.items():
         assert all(config[section][field] == "" for field in fields), f"Credential in template: {section}"
     notice = (root / "NOTICE.md").read_text(encoding="utf-8")
     assert "基于磐冰的 maibot-music 增强，音源接入参考 Zhalslar 的 AstrBot 插件" in notice

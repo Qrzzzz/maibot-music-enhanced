@@ -8,24 +8,24 @@
 2. 在项目根目录执行以下命令，`--note` 可以重复填写。它同步 manifest、代码版本常量、配置模板、README 版本及更新日志，不提交或发布代码。
 
    ```powershell
-   python scripts/prepare_release.py 1.0.1 --note "修复一个具体问题" --note "新增一个具体功能"
+   python scripts/prepare_release.py 1.1.1 --note "修复一个具体问题" --note "新增一个具体功能"
    git diff --check
    git add _manifest.json plugin.py config.example.toml README.md CHANGELOG.md
-   git commit -m "release: prepare 1.0.1"
+   git commit -m "release: prepare 1.1.1"
    git push origin main
    ```
 
-3. 打开 [Actions → Release plugin](https://github.com/Qrzzzz/maibot-music-enhanced/actions/workflows/release.yml)，点击 **Run workflow**，选择已推送的分支，预期版本填 `1.0.1`，保持 **dry_run=true**。也可使用 CLI：
+3. 打开 [Actions → Release plugin](https://github.com/Qrzzzz/maibot-music-enhanced/actions/workflows/release.yml)，点击 **Run workflow**，选择已推送的分支，预期版本填 `1.1.1`，保持 **dry_run=true**。也可使用 CLI：
 
    ```powershell
-   gh workflow run release.yml --ref main -f dry_run=true -f version=1.0.1
+   gh workflow run release.yml --ref main -f dry_run=true -f version=1.1.1
    ```
 
 4. 查看工作流摘要、测试结果和 `plugin-release-<源 SHA>-<尝试次数>` Artifact。独立的 verify job 按本次构建返回的 Artifact ID 下载并核对源码。演练只验证、打包并保存 Actions 产物，不创建标签、Release 或插件中心申请。已有版本也可演练，但演练包不等于该版本曾经公开的安装包。
 5. 确认演练通过且目标分支未变化后，对同一分支与版本运行 **dry_run=false**。正式运行会重新验证所选提交；不需要事先创建标签。
 
    ```powershell
-   gh workflow run release.yml --ref main -f dry_run=false -f version=1.0.1
+   gh workflow run release.yml --ref main -f dry_run=false -f version=1.1.1
    ```
 
 6. 成功后到 [Releases](https://github.com/Qrzzzz/maibot-music-enhanced/releases)核对版本。工作流摘要和 `plugin-publication-<源 SHA>-<尝试次数>` Artifact 保存公开 URL、源提交和附件核验结果。
@@ -37,11 +37,11 @@
 对于已经提交、检查并推送的版本，也可直接使用：
 
 ```powershell
-git tag -a v1.0.1 -m "麦麦点歌增强 1.0.1"
-git push origin v1.0.1
+git tag -a v1.1.1 -m "麦麦点歌增强 1.1.1"
+git push origin v1.1.1
 ```
 
-`v*` 标签触发正式发布。标签必须精确等于 `v` 加 manifest 的三段式版本，例如 `v1.0.1`，版本不符即失败。普通分支 CI 不处理标签，避免同一标签重复执行普通 CI；Release 工作流自身完整执行回归。
+`v*` 标签触发正式发布。标签必须精确等于 `v` 加 manifest 的三段式版本，例如 `v1.1.1`，版本不符即失败。普通分支 CI 不处理标签，避免同一标签重复执行普通 CI；Release 工作流自身完整执行回归。
 
 手动工作流用 `GITHUB_TOKEN` 创建标签不会再触发一份标签工作流，这是 GitHub 的[事件触发规则](https://docs.github.com/en/actions/concepts/security/github_token)。本工作流不依赖二次触发，创建标签后在当前运行中完成发布。
 

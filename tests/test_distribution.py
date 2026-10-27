@@ -47,7 +47,7 @@ async def test_default_cache_uses_sdk_data_dir_and_survives_config_reload(tmp_pa
         expected = tmp_path / "audio_cache"
         assert plugin._audio_cache.storage_dir == expected
         media = expected / "full_qq_test.mp3"
-        assert Path(plugin._audio_cache.napcat_path(media)) == media
+        assert Path(plugin._audio_cache.adapter_path(media)) == media
         await plugin.on_config_update("self", {}, "changed")
         assert plugin._audio_cache.storage_dir == expected
     finally:
@@ -60,12 +60,12 @@ async def test_explicit_adapter_cache_mapping_is_preserved(tmp_path, monkeypatch
     monkeypatch.setattr(module.shutil, "which", lambda name: "/tools/" + name)
     plugin = plugin_for(tmp_path)
     config = plugin.get_default_config()
-    config["music"].update(cache_storage_dir=str(tmp_path / "shared"), cache_napcat_dir="/app/music-cache")
+    config["music"].update(cache_storage_dir=str(tmp_path / "shared"), cache_reader_dir="/app/music-cache")
     plugin.set_plugin_config(config)
     await plugin.on_load()
     try:
         media = plugin._audio_cache.storage_dir / "test.mp3"
-        assert plugin._audio_cache.napcat_path(media) == "/app/music-cache/test.mp3"
+        assert plugin._audio_cache.adapter_path(media) == "/app/music-cache/test.mp3"
     finally:
         await plugin.on_unload()
 
@@ -83,7 +83,7 @@ async def test_missing_ffmpeg_gives_actionable_startup_error(tmp_path, monkeypat
 async def test_full_audio_send_releases_pinned_file_after_adapter_failure(tmp_path):
     plugin = plugin_for(tmp_path)
     media = tmp_path / "full_qq_test.mp3"
-    cache = types.SimpleNamespace(napcat_path=lambda path: str(path), release=AsyncMock())
+    cache = types.SimpleNamespace(adapter_path=lambda path: str(path), release=AsyncMock())
     plugin._audio_cache = cache
     api = types.SimpleNamespace(prepare_local_audio=AsyncMock(return_value=media))
     plugin._get_api = lambda: api

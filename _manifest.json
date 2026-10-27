@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "id": "github.qrzzzz.music-enhanced",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "name": "麦麦点歌增强",
   "description": "基于 maibot-music 增强的 QQ/网易云点歌插件，支持聚合音源、完整时长校验、转码和本地语音缓存",
   "author": {
