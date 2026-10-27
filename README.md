@@ -7,13 +7,16 @@
 | 项目 | 当前值 |
 | --- | --- |
 | 插件 ID | `github.qrzzzz.music-enhanced` |
-| 独立版本 | `1.1.0` |
+| 独立版本 | `1.1.1` |
 | 许可证 | GPL-3.0-only，保留原 MIT 声明及测试夹具的原 GPLv3-or-later 声明 |
-| 声明兼容范围 | MaiBot `1.3.15` / Plugin SDK `2.16.0` |
+| 插件类型 | `tool`（命令及 LLM 点歌工具） |
+| 声明兼容范围 | MaiBot `1.3.15–1.3.99` / Plugin SDK `2.16.0` |
 | 推荐连接器 | 官方 [统一 QQ 适配器](https://github.com/Mai-with-u/MaiBot-SnowLuma-Adapter)，可连接 SnowLuma 或 NapCat |
 | 开发环境 | Windows、Python 3.12；CI 使用 Linux、Python 3.12 |
 
 [源码仓库](https://github.com/Qrzzzz/maibot-music-enhanced) · [Releases](https://github.com/Qrzzzz/maibot-music-enhanced/releases) · [Actions](https://github.com/Qrzzzz/maibot-music-enhanced/actions) · [兼容性与验收边界](docs/COMPATIBILITY.md)
+
+1.1.1 只调整插件分类和兼容声明，不改变 1.1.0 的双端发送路线。`1.3.99` 是允许同一 `1.3` 系列补丁更新的上限声明，不是已经实测的 Host 版本；实际加载验证仍为 MaiBot `1.3.15` / SDK `2.16.0`。SDK 超出声明范围时仍会被校验器阻止加载。
 
 ## 1.1.0 的发送路线
 
@@ -108,7 +111,7 @@ python scripts/check_release.py
 已安装 MaiBot 的环境可运行 `python scripts/check_host.py`，验证官方加载器与隔离生命周期；它不发送 QQ 消息。
 
 ```powershell
-python scripts/prepare_release.py 1.1.1 --note "本次更新的具体说明"
+python scripts/prepare_release.py 1.1.2 --note "本次更新的具体说明"
 ```
 
 提交推送后，打开 [Release plugin](https://github.com/Qrzzzz/maibot-music-enhanced/actions/workflows/release.yml)，先运行 `dry_run=true`，通过后对同一提交运行 `false`。也支持推送匹配 manifest 的 `vX.Y.Z` 标签。完整发布、重跑和插件中心流程见 [RELEASING.md](docs/RELEASING.md)。

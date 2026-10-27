@@ -48,6 +48,7 @@ def check_tree(root: Path) -> dict:
         assert (root / name).is_file(), f"Missing release file: {name}"
     manifest = json.loads((root / "_manifest.json").read_text(encoding="utf-8"))
     assert manifest["manifest_version"] == 2 and manifest["id"] == PLUGIN_ID
+    assert manifest.get("plugin_type") == "tool", "The plugin's primary role must be declared as tool"
     assert manifest["license"] == "GPL-3.0-only" and manifest["author"]["name"] == "Qrzzzz"
     for value in (manifest["version"], *(v for key in ("host_application", "sdk") for v in manifest[key].values())):
         assert re.fullmatch(r"\d+\.\d+\.\d+", value), f"Invalid version: {value}"

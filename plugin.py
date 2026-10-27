@@ -23,7 +23,7 @@ from .music_api import MusicAPIResponseError, SongInfo
 from .source_bridge import SourceAwareSearchClient as MusicSearchClient
 from .url_parser import extract_urls, parse_music_card_text, parse_music_url
 
-PLUGIN_VERSION = "1.1.0"
+PLUGIN_VERSION = "1.1.1"
 
 
 # ===== 配置模型 =====

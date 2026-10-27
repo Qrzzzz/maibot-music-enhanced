@@ -1,7 +1,7 @@
 # 首次安装复制为 config.toml；也可让 MaiBot 根据配置模型生成默认配置。
 [plugin]
 enabled = true
-config_version = "1.1.0"
+config_version = "1.1.1"
 
 [music]
 default_platform = "qq"       # QQ 优先，LLM 工具失败时换网易云

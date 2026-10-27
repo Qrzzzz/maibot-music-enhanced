@@ -27,6 +27,19 @@ async def check() -> dict:
     loader = PluginLoader(host_version=host_version)
     metadata = loader.load_candidate(manifest.id, (ROOT, manifest, ROOT / "plugin.py"))
     assert metadata is not None, "Official plugin loader failed"
+    assert metadata.plugin_type == "tool", "Host did not preserve the declared plugin role"
+    manifest_data = json.loads((ROOT / "_manifest.json").read_text(encoding="utf-8"))
+    compatibility_checks = []
+    for candidate, accepted in (("1.3.14", False), ("1.3.15", True), ("1.3.16", True),
+                                ("1.3.99", True), ("1.4.0", False), ("2.0.0", False)):
+        range_validator = ManifestValidator(host_version=candidate, sdk_version="2.16.0",
+                                           log_errors=False, log_compat_warnings=False)
+        valid = range_validator.validate(manifest_data)
+        assert valid is accepted, (candidate, range_validator.errors)
+        if accepted:
+            assert not range_validator.warnings, (candidate, range_validator.warnings)
+        compatibility_checks.append({"declared_host_version": candidate, "accepted": valid,
+                                     "warning_count": len(range_validator.warnings)})
     plugin = metadata.instance
     instance = Path(os.environ["MAIBOT_INSTANCE_DIR"])
     data_dir = instance / "data" / "plugins" / manifest.id
@@ -53,6 +66,8 @@ async def check() -> dict:
         await plugin.on_unload()
     assert plugin._audio_cache is None and plugin._api is None and not rpc_calls
     return {"status": "passed", "plugin_id": manifest.id, "version": manifest.version, "host_version": host_version,
+            "plugin_type": metadata.plugin_type, "host_range": manifest_data["host_application"],
+            "version_range_checks_only": compatibility_checks,
             "manifest_validated_by_host": True, "official_loader_passed": True,
             "isolated_load_reload_unload": True, "components": len(components), "host_rpc_calls": len(rpc_calls), "qq_message_sent": False}
 
