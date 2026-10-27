@@ -1,0 +1,145 @@
+name: Release plugin
+run-name: Release plugin (${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && 'dry run' || 'publish' }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: '只测试、打包和上传 Actions 产物，不创建标签或 Release'
+        type: boolean
+        default: true
+        required: true
+      version:
+        description: '可选：预期版本（如 1.0.1），必须与所选分支 manifest 一致'
+        type: string
+        default: ''
+        required: false
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: plugin-release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      dry_run: ${{ steps.plan.outputs.dry_run }}
+      source_commit: ${{ steps.plan.outputs.source_commit }}
+      version: ${{ steps.plan.outputs.version }}
+      artifact_id: ${{ steps.bundle.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Plan exact source version
+        id: plan
+        env:
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && 'true' || 'false' }}
+          EXPECTED_VERSION: ${{ inputs.version }}
+          EVENT_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+          EXPECTED_SHA: ${{ github.sha }}
+        run: >-
+          python scripts/release.py plan --dry-run "$DRY_RUN"
+          --expected-version "$EXPECTED_VERSION" --tag "$EVENT_TAG" --expected-sha "$EXPECTED_SHA"
+      - name: Install FFmpeg
+        run: |
+          if ! command -v ffmpeg >/dev/null || ! command -v ffprobe >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install --no-install-recommends -y -qq ffmpeg
+          fi
+          ffmpeg -version
+          ffprobe -version
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Test the source commit
+        run: python -m pytest -q -ra
+      - name: Build and verify exact source archive
+        run: |
+          python scripts/build_release.py
+          python scripts/release.py verify
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: bundle
+        with:
+          name: plugin-release-${{ steps.plan.outputs.source_commit }}-${{ github.run_attempt }}
+          path: |
+            dist/*.zip
+            dist/SHA256SUMS
+            dist/release-manifest.json
+            dist/release-context.json
+            dist/release-notes.md
+          if-no-files-found: error
+          retention-days: 14
+
+  verify:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.build.outputs.source_commit }}
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact_id }}
+          merge-multiple: true
+          github-token: ${{ github.token }}
+          run-id: ${{ github.run_id }}
+          path: dist
+      - name: Verify transferred artifact against the source commit
+        run: python scripts/release.py verify
+
+  publish:
+    needs: [build, verify]
+    if: needs.build.outputs.dry_run == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.build.outputs.source_commit }}
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact_id }}
+          merge-multiple: true
+          github-token: ${{ github.token }}
+          run-id: ${{ github.run_id }}
+          path: dist
+      - name: Verify, stage, read back and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/release.py publish
+      - name: Save publication evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: plugin-publication-${{ needs.build.outputs.source_commit }}-${{ github.run_attempt }}
+          path: dist/publication.json
+          if-no-files-found: ignore
+          retention-days: 30

@@ -113,10 +113,22 @@ python scripts/check_release.py
 
 ```powershell
 python scripts/build_release.py
-python scripts/check_release.py --archive dist/maibot-music-enhanced-1.0.0.zip
+python scripts/check_release.py --built
 ```
 
 构建输出 ZIP、`SHA256SUMS` 和记录源提交的 `release-manifest.json`。打包只使用 Git 跟踪的文件，且会拒绝配置、凭证、音频、运行数据或日志。具体 GitHub Release 与插件中心提交步骤见 [发布说明](docs/RELEASING.md)。
+
+## 发布新版本
+
+用一条命令同步版本与更新日志，再提交、推送代码：
+
+```powershell
+python scripts/prepare_release.py 1.0.1 --note "本次更新的具体说明"
+```
+
+随后打开 [Release plugin 工作流](https://github.com/Qrzzzz/maibot-music-enhanced/actions/workflows/release.yml)，选择 `main`，填写预期版本；默认 `dry_run=true` 只做测试与打包。确认演练通过后，对同一提交运行 `dry_run=false` 即可正式发布。也支持推送与版本一致的 `vX.Y.Z` 标签触发正式发布。
+
+工作流自动运行回归、检查版本一致性、生成 ZIP 和 SHA256、验证源码提交、暂存草稿、回读下载附件，最后公开 Release。已有版本不覆盖；完整步骤、重跑规则和权限说明见 [发布说明](docs/RELEASING.md)。
 
 ## 许可证与致谢
 

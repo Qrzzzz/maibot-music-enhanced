@@ -22,6 +22,8 @@ from .music_api import MusicAPIResponseError, SongInfo
 from .source_bridge import SourceAwareSearchClient as MusicSearchClient
 from .url_parser import extract_urls, parse_music_card_text, parse_music_url
 
+PLUGIN_VERSION = "1.0.0"
+
 
 # ===== QQ 音乐卡片直连 NapCat（绕过 MaiBot 适配器） =====
 
@@ -60,7 +62,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用插件")
-    config_version: str = Field(default="1.0.0", description="配置版本")
+    config_version: str = Field(default=PLUGIN_VERSION, description="配置版本")
 
 
 class MusicConfig(PluginConfigBase):
@@ -642,7 +644,7 @@ class MusicPlugin(MaiBotPlugin):
             self._error_log.close()
             self._error_log = None
             raise
-        self.ctx.logger.info("麦麦点歌增强 1.0.0 已加载")
+        self.ctx.logger.info("麦麦点歌增强 %s 已加载", PLUGIN_VERSION)
 
     async def on_unload(self) -> None:
         """插件卸载，关闭 HTTP 客户端和缓存任务。"""

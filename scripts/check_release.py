@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
 import re
@@ -23,6 +24,7 @@ REQUIRED = (
     "licenses/astrbot_plugin_music-GPL-3.0.txt", "docs/RELEASING.md", "docs/VALIDATION.md",
     "scripts/check_release.py", "scripts/build_release.py", "scripts/check_host.py",
     "tests/test_source_bridge.py", "tests/test_distribution.py",
+    "scripts/release.py", "scripts/prepare_release.py", ".github/workflows/release.yml",
 )
 FORBIDDEN_PARTS = {".git", ".venv", "venv", "__pycache__", ".pytest_cache", "data", "logs", "dist", "build"}
 FORBIDDEN_SUFFIXES = {".pyc", ".pyo", ".log", ".db", ".sqlite", ".sqlite3", ".mp3", ".m4a", ".flac", ".part", ".pem", ".key"}
@@ -50,6 +52,12 @@ def check_tree(root: Path) -> dict:
     assert set(manifest["capabilities"]) == {"send.text", "send.custom"}
     config = tomllib.loads((root / "config.example.toml").read_text(encoding="utf-8"))
     assert config["plugin"]["config_version"] == manifest["version"]
+    module = ast.parse((root / "plugin.py").read_text(encoding="utf-8"))
+    versions = [ast.literal_eval(node.value) for node in module.body if isinstance(node, ast.Assign)
+                and any(isinstance(target, ast.Name) and target.id == "PLUGIN_VERSION" for target in node.targets)]
+    assert versions == [manifest["version"]], "plugin.py PLUGIN_VERSION differs from manifest"
+    assert re.search(r"^## " + re.escape(manifest["version"]) + r" — \d{4}-\d{2}-\d{2}$",
+                     (root / "CHANGELOG.md").read_text(encoding="utf-8"), re.MULTILINE), "Missing versioned changelog"
     assert config["source_bridge"]["enabled"] and config["music"]["play_mode"] == "voice"
     assert config["music"]["voice_source"] == "local"
     assert config["music"]["cache_storage_dir"] == config["music"]["cache_napcat_dir"] == ""
@@ -91,7 +99,12 @@ def check_archive(archive: Path) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--archive", type=Path)
+    parser.add_argument("--built", action="store_true", help="Check the ZIP named by dist/release-manifest.json")
     args = parser.parse_args()
+    if args.built:
+        assert not args.archive, "Choose --archive or --built"
+        report = json.loads((ROOT / "dist/release-manifest.json").read_text(encoding="utf-8"))
+        args.archive = ROOT / "dist" / report["archive"]
     report = check_archive(args.archive.resolve()) if args.archive else check_tree(ROOT)
     print(json.dumps(report, ensure_ascii=False, indent=2))
 
