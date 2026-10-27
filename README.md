@@ -11,9 +11,9 @@
 | 许可证 | GPL-3.0-only，保留上游 MIT 版权及许可声明 |
 | 声明兼容范围 | MaiBot `1.3.15` / Plugin SDK `2.16.0` |
 | 开发验证环境 | Windows、Python `3.12`；其他系统尚未做主机实测 |
-| 计划仓库地址 | `https://github.com/Qrzzzz/maibot-music-enhanced` |
+| 源码仓库 | [Qrzzzz/maibot-music-enhanced](https://github.com/Qrzzzz/maibot-music-enhanced) |
 
-仓库地址是发布配置中的目标地址；本地打包不代表已上传 GitHub、发布 Release 或获插件中心收录。
+下载版本见 [GitHub Releases](https://github.com/Qrzzzz/maibot-music-enhanced/releases)，构建结果见 [GitHub Actions](https://github.com/Qrzzzz/maibot-music-enhanced/actions)。插件中心收录以官方审核结果为准。
 
 ## 功能与默认行为
 

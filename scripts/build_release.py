@@ -37,7 +37,7 @@ def main() -> None:
     digest = hashlib.sha256(archive.read_bytes()).hexdigest()
     (destination / "SHA256SUMS").write_text(f"{digest}  {archive.name}\n", encoding="utf-8", newline="\n")
     report = check_archive(archive)
-    report.update(source_commit=commit, git_tag_created=False, github_release_published=False, archive_bytes=archive.stat().st_size)
+    report.update(source_commit=commit, archive_bytes=archive.stat().st_size)
     (destination / "release-manifest.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
     print(json.dumps(report, ensure_ascii=False, indent=2))
 

@@ -18,6 +18,7 @@
 
 - 当前独立插件 ID 的真实 QQ 收发验收；本次隔离 Host 检查没有发送 QQ 消息。
 - Linux / macOS 的主机与适配器验收，以及其他 MaiBot / SDK 版本。
-- GitHub Actions 远程执行、GitHub Release 发布、插件中心提交或收录。
+
+远程 [GitHub Actions](https://github.com/Qrzzzz/maibot-music-enhanced/actions)、[Release](https://github.com/Qrzzzz/maibot-music-enhanced/releases) 与插件中心的状态分别以对应服务的实际记录为准，不包含在以上本地验证结论中。
 
 此前机器人本地增强版的音源与 QQ 运行记录属于迁移前证据。本项目保留其代码基础，但独立包的完整性验证与真实账号收发验证分别记录。当前机器人目录未替换为新插件。

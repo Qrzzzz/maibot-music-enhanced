@@ -15,7 +15,7 @@
 
 ## GitHub 发布
 
-计划仓库：`https://github.com/Qrzzzz/maibot-music-enhanced`。确认公开发布授权后，创建该公开仓库并推送本地 `main`。如果最终使用其他仓库地址，应先同步 manifest 和文档后重新验证、打包。
+公开仓库：`https://github.com/Qrzzzz/maibot-music-enhanced`。推送已验证的本地 `main`，等待对应提交的 GitHub Actions 通过后发布。如果以后迁移仓库地址，应先同步 manifest 和文档后重新验证、打包。
 
 在已经验证的源提交创建 `v1.0.0` Tag，发布对应的 GitHub Release。Release 内容可取自 `CHANGELOG.md` 的 1.0.0 条目，并附上 `dist/` 中的 ZIP、`SHA256SUMS`、`release-manifest.json`。不要让 Tag 指向另一个未经验证的提交。
 
