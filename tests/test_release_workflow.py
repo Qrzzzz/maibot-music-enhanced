@@ -146,7 +146,8 @@ def test_completed_release_rerun_verifies_without_editing(repo, tmp_path, monkey
     monkeypatch.setattr(release_tools, "verify_bundle", lambda *args: files)
     monkeypatch.setattr(release_tools, "tag_commit", lambda *args: context["source_commit"])
     public = {"assets": assets, "draft": False, "prerelease": False, "html_url": "https://github.com/release"}
-    api = Mock(return_value=public); monkeypatch.setattr(release_tools, "api", api)
+    api = Mock(); monkeypatch.setattr(release_tools, "api", api)
+    monkeypatch.setattr(release_tools, "find_release", Mock(return_value=public))
     command = Mock(side_effect=AssertionError("Must not mutate a completed release")); monkeypatch.setattr(release_tools, "command", command)
     assert release_tools.publish(repo, tmp_path, context)["status"] == "already_published"
     assert all(call.args[0] == "GET" for call in api.call_args_list)
@@ -162,8 +163,8 @@ def test_draft_is_public_only_after_downloaded_assets_pass(repo, tmp_path, monke
     monkeypatch.setattr(release_tools, "tag_commit", Mock(side_effect=[None, context["source_commit"]]))
     draft = {"assets": assets, "draft": True, "prerelease": False, "html_url": "https://github.com/release"}
     public = dict(draft, draft=False)
-    replies = iter([None, {"ref": "created"}, draft, public])
-    monkeypatch.setattr(release_tools, "api", Mock(side_effect=lambda *args, **kwargs: next(replies)))
+    monkeypatch.setattr(release_tools, "find_release", Mock(side_effect=[None, draft, public]))
+    monkeypatch.setattr(release_tools, "api", Mock(return_value={"ref": "created"}))
     command = Mock(return_value=""); monkeypatch.setattr(release_tools, "command", command)
     if bad_download:
         with pytest.raises(ValueError, match="downloaded bundle"):
@@ -173,3 +174,17 @@ def test_draft_is_public_only_after_downloaded_assets_pass(repo, tmp_path, monke
         report = release_tools.publish(repo, tmp_path, context)
         assert report["downloaded_assets_verified"] and report["status"] == "published"
         assert [call.args[0][2] for call in command.call_args_list] == ["create", "download", "edit"]
+
+
+def test_release_lookup_includes_drafts_instead_of_using_published_tag_endpoint(monkeypatch):
+    draft = {"tag_name": "v1.1.0", "draft": True}
+    api = Mock(return_value=[{"tag_name": "v1.0.0", "draft": False}, draft])
+    monkeypatch.setattr(release_tools, "api", api)
+    assert release_tools.find_release("owner/repo", "v1.1.0") is draft
+    api.assert_called_once_with("GET", "repos/owner/repo/releases?per_page=100&page=1")
+
+
+def test_release_lookup_refuses_duplicate_drafts(monkeypatch):
+    monkeypatch.setattr(release_tools, "api", Mock(return_value=[{"tag_name": "v1.1.0"}, {"tag_name": "v1.1.0"}]))
+    with pytest.raises(ValueError, match="Multiple releases"):
+        release_tools.find_release("owner/repo", "v1.1.0")

@@ -143,6 +143,20 @@ def verify_assets(release: dict, files: list[Path]) -> None:
             raise ValueError(f"Remote asset mismatch: {path.name}; refusing to overwrite")
 
 
+def find_release(repository: str, tag: str) -> dict | None:
+    """List releases with authenticated access so drafts are visible as well as public versions."""
+    for page in range(1, 101):
+        releases = api("GET", f"repos/{repository}/releases?per_page=100&page={page}")
+        matches = [release for release in releases if release["tag_name"] == tag]
+        if len(matches) > 1:
+            raise ValueError("Multiple releases share the same tag; refusing an ambiguous publication")
+        if matches:
+            return matches[0]
+        if len(releases) < 100:
+            return None
+    raise ValueError("Release lookup pagination limit reached; refusing to create a duplicate")
+
+
 def publish(root: Path, directory: Path, context: dict) -> dict:
     if context["dry_run"] is not False:
         raise ValueError("Dry run cannot create tags or publish a release")
@@ -151,8 +165,7 @@ def publish(root: Path, directory: Path, context: dict) -> dict:
     remote_commit = tag_commit(repository, tag)
     if remote_commit is not None and remote_commit != sha:
         raise ValueError("Existing tag points at another source commit; publish a new version")
-    route = f"repos/{repository}/releases/tags/{tag}"
-    existing = api("GET", route, missing_ok=True)
+    existing = find_release(repository, tag)
     if existing:
         if remote_commit != sha:
             raise ValueError("Existing release has no matching source tag")
@@ -167,7 +180,9 @@ def publish(root: Path, directory: Path, context: dict) -> dict:
         command(["gh", "release", "create", tag, *map(str, files), "--repo", repository,
                  "--verify-tag", "--draft", "--title", "麦麦点歌增强 " + context["version"],
                  "--notes-file", str(directory / "release-notes.md")], cwd=root)
-    draft = api("GET", route)
+    draft = find_release(repository, tag)
+    if draft is None:
+        raise ValueError("Created draft was not found; inspect the existing release before retrying")
     verify_assets(draft, files)
     with tempfile.TemporaryDirectory(prefix="music-release-readback-") as temporary:
         args = ["gh", "release", "download", tag, "--repo", repository, "--dir", temporary]
@@ -178,7 +193,9 @@ def publish(root: Path, directory: Path, context: dict) -> dict:
     if tag_commit(repository, tag) != sha:
         raise ValueError("Remote tag changed before publication")
     command(["gh", "release", "edit", tag, "--repo", repository, "--draft=false", "--latest"], cwd=root)
-    released = api("GET", route)
+    released = find_release(repository, tag)
+    if released is None:
+        raise ValueError("Published release was not found")
     verify_assets(released, files)
     if released["draft"] or released["prerelease"]:
         raise ValueError("Release is not public and stable")
