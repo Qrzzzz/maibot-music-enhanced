@@ -49,6 +49,17 @@ def make_client() -> MusicSearchClient:
 
 
 @pytest.mark.asyncio
+async def test_qq_detail_preserves_standard_card_id_separately_from_mid():
+    client = make_client()
+    client._qq_client.post.return_value = FakeResponse({"code": 0, "req_0": {"code": 0,
+        "data": {"track_info": {"id": 375492492, "mid": "song-mid", "name": "Song",
+            "singer": [{"name": "Artist"}], "album": {}, "file": {"media_mid": "media-mid"}}}}})
+    song = await client.get_qq_song_detail("song-mid")
+    assert song.song_id == "song-mid" and song.numeric_id == "375492492"
+    assert song.media_id == "media-mid"
+
+
+@pytest.mark.asyncio
 async def test_qq_client_uses_configured_login_cookie() -> None:
     client = MusicSearchClient(
         qq_cookie={
