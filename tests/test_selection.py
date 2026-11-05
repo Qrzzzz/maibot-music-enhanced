@@ -23,7 +23,7 @@ def setup(count=3):
 
 
 async def search(p, user="alice", stream="group", **kw):
-    return await p._do_search_and_send("Song", "qq", stream, user_id=user, **kw)
+    return await p._do_search_and_send("Song", "qq", stream, user_id=user, transport="qq", **kw)
 
 
 @pytest.mark.asyncio
@@ -39,12 +39,19 @@ async def test_default_waits_and_includes_metadata_and_controls():
 
 
 @pytest.mark.asyncio
-async def test_commands_and_tool_share_user_state_and_override_mode():
+async def test_numeric_hook_and_tool_share_user_state_and_override_mode():
     p, api, songs = setup()
-    result = await p.handle_search_music(query="Song", music_platform="qq", stream_id="group", user_id="alice", platform="qq")
+    result = await p.handle_search_music(query="Song", music_platform="qq", stream_id="group", user_id="alice", platform="qq", send_mode="card")
     assert result["status"] == "success"
-    result = await p.handle_select_command(stream_id="group", user_id="alice", text="/选歌 2 卡片")
-    assert result[0]
+    message = {"session_id": "group", "processed_plain_text": "2",
+               "message_info": {"user_info": {"user_id": "bob"}}}
+    assert await p.handle_music_url_parse(message=message) == {"action": "continue"}
+    message["message_info"]["user_info"]["user_id"] = "alice"
+    message["processed_plain_text"] = "/选歌 2"
+    assert await p.handle_music_url_parse(message=message) == {"action": "continue"}
+    message["processed_plain_text"] = "2"
+    assert await p.handle_music_url_parse(message=message) == {"action": "abort"}
+    await asyncio.gather(*p._menu_tasks)
     p._send_song.assert_awaited_once_with(songs[1], "group", mode="card", silent=True)
     assert not p._pending_choices
 
@@ -92,7 +99,7 @@ async def test_pagination_preserves_global_numbering_and_rejects_bounds():
 async def test_expiration_removes_only_idle_state():
     p, api, _ = setup()
     await search(p)
-    p._pending_choices[("group", "alice")].created = time.monotonic() - 301
+    p._pending_choices[("group", "alice")].created = time.monotonic() - 91
     assert not (await p._selection_action("group", "alice", "select", index=1))[0]
     assert not p._pending_choices
 
@@ -328,7 +335,48 @@ def test_legacy_migration_keeps_explicit_preferences():
     assert config["music"]["auto_select_first"] is True
     assert config["music"]["default_platform"] == "163"
     assert config["music"]["play_mode"] == "card"
-    assert config["plugin"]["config_version"] == "1.2.0"
+    assert config["plugin"]["config_version"] == module.PLUGIN_VERSION
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["selected", "cancelled", "expired", "disabled"])
+async def test_auto_recall_uses_only_list_receipt(outcome):
+    p, _, _ = setup()
+    config = p.get_default_config()
+    config["music"]["auto_recall_selection"] = outcome != "disabled"
+    p.set_plugin_config(config)
+    p.ctx.api = types.SimpleNamespace(call=AsyncMock(return_value={"retcode": 0}))
+    p.ctx.send.text.return_value = {"sent": True, "message_id": "123"}
+    assert (await search(p))[0]
+    key = ("group", "alice")
+    pending = p._pending_choices[key]
+    assert p.ctx.send.text.await_args.kwargs == {"return_details": True}
+    if outcome == "selected":
+        assert (await p._selection_action(*key, "select", index=1))[0]
+    elif outcome == "expired":
+        p._expire_menu(key, pending)
+    else:
+        assert (await p._selection_action(*key, "cancel"))[0]
+    await asyncio.gather(*p._menu_tasks)
+    assert key not in p._pending_choices
+    if outcome == "disabled":
+        p.ctx.api.call.assert_not_awaited()
+    else:
+        p.ctx.api.call.assert_awaited_once_with(
+            "maibot-team.snowluma-adapter.adapter.napcat.message.delete_msg", version="1", message_id="123")
+
+
+@pytest.mark.asyncio
+async def test_matching_cross_platform_metadata_groups_but_keeps_platform_and_versions():
+    p, api, songs = setup(1)
+    duplicate = module.SongInfo("400", songs[0].name, "Artist", "Album", "163")
+    live = module.SongInfo("401", songs[0].name + " Live", "Artist", "Album", "163")
+    api.search.side_effect = [songs, [duplicate, live]]
+    assert (await p._do_search_and_send("Song", "auto", "group", user_id="alice"))[0]
+    assert "[QQ / 网易云]" in p.ctx.send.text.await_args.args[0]
+    assert p._pending_choices[("group", "alice")].results == [songs[0], live]
+    assert (await p._selection_action("group", "alice", "select", index=1, music_platform="163"))[0]
+    p._send_song.assert_awaited_once_with(duplicate, "group", mode="voice", silent=True)
 
 
 @pytest.mark.asyncio

@@ -24,7 +24,7 @@ from .music_api import MusicAPIResponseError, SongInfo
 from .source_bridge import SourceAwareSearchClient as MusicSearchClient
 from .url_parser import extract_urls, parse_music_card_text, parse_music_url
 
-PLUGIN_VERSION = "1.2.0"
+PLUGIN_VERSION = "1.2.1"
 
 
 # ===== 配置模型 =====
@@ -57,6 +57,9 @@ class MusicConfig(PluginConfigBase):
     auto_parse_card: bool = Field(default=False, description="是否自动解析音乐卡片")
     search_limit: int = Field(default=10, ge=1, le=20, description="每个平台搜索结果数（1–20）")
     page_size: int = Field(default=5, ge=1, le=10, description="每页候选数量")
+    selection_timeout_seconds: int = Field(default=90, ge=10, le=600, description="选歌列表有效期（秒）")
+    auto_recall_selection: bool = Field(default=True, description="自动撤回列表，需要 SnowLuma 支持消息 ID 回执和撤回")
+    group_cross_platform_results: bool = Field(default=True, description="合并歌名、歌手和专辑一致的跨平台候选")
     auto_select_first: bool = Field(
         default=False,
         description="搜索到多首歌曲时是否跳过选歌阶段，直接发送第一首",
@@ -135,10 +138,6 @@ class MusicPluginConfig(PluginConfigBase):
 
 # ===== 待选状态 =====
 
-# 待选状态过期时间（秒）
-_PENDING_TTL = 300
-
-
 @dataclass
 class PendingSelection:
     query: str
@@ -149,6 +148,11 @@ class PendingSelection:
     created: float = field(default_factory=time.monotonic)
     busy: bool = False
     owner_id: str = ""
+    transport: str = ""
+    alternatives: dict[int, list[SongInfo]] = field(default_factory=dict)
+    menu_id: str = ""
+    expiry: asyncio.TimerHandle | None = None
+    queued: bool = False
 
 
 # ===== 插件主类 =====
@@ -171,14 +175,76 @@ class MusicPlugin(MaiBotPlugin):
         # User identity is supplied by Host, never accepted as an LLM tool parameter.
         self._pending_choices: dict[tuple[str, str], PendingSelection] = {}
         self._pending_lock = asyncio.Lock()
+        self._menu_tasks: set[asyncio.Task[None]] = set()
 
     def _clean_expired_pending(self) -> None:
         """清理已过期的待选状态。"""
         now = time.monotonic()
         expired = [sid for sid, item in self._pending_choices.items()
-                   if not item.busy and now - item.created > _PENDING_TTL]
+                   if not item.busy and now - item.created >= self.config.music.selection_timeout_seconds]
         for sid in expired:
-            del self._pending_choices[sid]
+            self._drop_pending(sid)
+
+    def _drop_pending(self, key: tuple[str, str]) -> None:
+        pending = self._pending_choices.pop(key)
+        if pending.expiry:
+            pending.expiry.cancel()
+        if pending.transport == "qq":
+            self._recall_menu(pending.menu_id)
+
+    def _recall_menu(self, message_id: str) -> None:
+        if not re.fullmatch(r"-?[0-9]+", message_id) or not self.config.music.auto_recall_selection:
+            return
+
+        async def recall() -> None:
+            try:
+                result = await self.ctx.api.call(
+                    "maibot-team.snowluma-adapter.adapter.napcat.message.delete_msg",
+                    version="1", message_id=message_id,
+                )
+                if not isinstance(result, Mapping) or result.get("retcode") != 0:
+                    self.ctx.logger.warning("选歌列表撤回未确认，请检查 SnowLuma 撤回支持")
+            except Exception:
+                self.ctx.logger.warning("选歌列表撤回失败，请检查 SnowLuma 撤回支持")
+
+        task = asyncio.create_task(recall())
+        self._menu_tasks.add(task)
+        task.add_done_callback(self._menu_tasks.discard)
+
+    def _expire_menu(self, key: tuple[str, str], pending: PendingSelection) -> None:
+        if self._pending_choices.get(key) is pending:
+            if pending.busy:
+                self._recall_menu(pending.menu_id)
+                pending.menu_id = ""
+            else:
+                self._drop_pending(key)
+
+    async def _send_selection_menu(self, key: tuple[str, str], pending: PendingSelection, text: str) -> bool:
+        if self._pending_choices.get(key) is not pending or pending.busy:
+            return False
+        pending.busy = True
+        try:
+            receipt = await self.ctx.send.text(text, key[0], return_details=True)
+        except Exception:
+            return False
+        finally:
+            pending.busy = False
+        sent = bool(receipt.get("sent")) if isinstance(receipt, Mapping) else bool(receipt)
+        if not sent:
+            return False
+        message_id = (str(receipt.get("message_id") or "")
+                      if isinstance(receipt, Mapping) and pending.transport == "qq" else "")
+        if self._pending_choices.get(key) is not pending:
+            self._recall_menu(message_id)
+            return False
+        self._recall_menu(pending.menu_id)
+        pending.menu_id = message_id
+        if pending.expiry is None:
+            pending.created = time.monotonic()
+            pending.expiry = asyncio.get_running_loop().call_later(
+                self.config.music.selection_timeout_seconds, self._expire_menu, key, pending)
+        self._clean_expired_pending()
+        return True
 
     def normalize_plugin_config(self, config_data: Mapping[str, Any] | None) -> tuple[dict[str, Any], bool]:
         """Migrate old cache paths and discard obsolete client HTTP credentials."""
@@ -346,9 +412,9 @@ class MusicPlugin(MaiBotPlugin):
         link = self._public_song_url(song)
         if not link:
             return False
-        note = "标准音乐卡片不可用，已改发歌曲链接。\n" if fallback else ""
+        note = "ℹ️ 标准音乐卡片不可用，已改发歌曲链接。\n" if fallback else ""
         try:
-            return bool(await self.ctx.send.text(f"{note}{song.display()}\n{link}", stream_id))
+            return bool(await self.ctx.send.text(f"{note}🔗 {song.display()}\n{link}", stream_id))
         except Exception:
             self.ctx.logger.warning("歌曲链接发送失败: %s %s", song.platform, song.song_id)
             return False
@@ -379,18 +445,29 @@ class MusicPlugin(MaiBotPlugin):
         size = self.config.music.page_size
         start = pending.page * size
         pages = (len(pending.results) + size - 1) // size
-        lines = [f"🎵 {pending.query} · 第 {pending.page + 1}/{pages} 页 · 发起人 {pending.owner_id}"]
+        mode_label = {"voice": "语音", "card": "卡片", "link": "链接"}[self._mode(pending.mode)]
+        lines = [f"🎵 「{pending.query}」的搜索结果",
+                 f"📄 第 {pending.page + 1}/{pages} 页 · 共 {len(pending.results)} 首 · 发起人 {pending.owner_id}", ""]
         for i, song in enumerate(pending.results[start:start + size], start + 1):
             platform = "QQ" if song.platform == "qq" else "网易云"
+            if i in pending.alternatives:
+                platform = "QQ / 网易云"
             lines.append(f"{i}. [{platform}] {song.display()}")
         pfx = self.config.music.command_prefix
-        lines.extend([f"{pfx}选歌 {start + 1} [语音/卡片/链接]（本次默认：{self._mode(pending.mode)}）",
-                      f"{pfx}歌单 下一页 / 上一页 · {pfx}换源 QQ/网易/全部 · {pfx}取消选歌",
-                      "候选仅供发起人选择，5分钟内有效；序号按整份列表编号。"])
+        lines.extend(["", f"▶️ 直接回复数字 {start + 1}（本次发{mode_label}）"])
+        if pending.page > 0:
+            lines.append(f"⬅️ {pfx}歌单 上一页")
+        if pending.page + 1 < pages:
+            lines.append(f"➡️ {pfx}歌单 下一页")
+        other_platform = "QQ" if pending.platform == "163" else "网易"
+        lines.extend([f"🔄 {pfx}换源 {other_platform}　·　✖️ {pfx}取消选歌",
+                      f"⏳ 仅发起人可选，{self.config.music.selection_timeout_seconds} 秒内有效。翻页后序号连续。"])
+        if self.config.music.auto_recall_selection:
+            lines.append("🧹 自动撤回已开启，需要 SnowLuma 支持回执和撤回。")
         return "\n".join(lines)
 
     async def _do_search_and_send(self, query: str, platform: str = "", stream_id: str = "",
-                                  *, user_id: str = "", send_mode: str = "") -> tuple[bool, str]:
+                                  *, user_id: str = "", send_mode: str = "", transport: str = "") -> tuple[bool, str]:
         if not stream_id or not user_id:
             return False, "Host 未提供聊天或用户身份，请由本人使用点歌命令，不能建立共享选歌列表"
         if not query.strip() or len(query) > 200:
@@ -401,7 +478,7 @@ class MusicPlugin(MaiBotPlugin):
         except ValueError as exc:
             return False, str(exc)
         key = (stream_id, user_id)
-        pending = PendingSelection(query.strip(), resolved, send_mode, owner_id=user_id)
+        pending = PendingSelection(query.strip(), resolved, send_mode, owner_id=user_id, transport=transport)
         async with self._pending_lock:
             self._clean_expired_pending()
             old = self._pending_choices.get(key)
@@ -409,6 +486,8 @@ class MusicPlugin(MaiBotPlugin):
                 return False, "这首歌正在发送，请稍后再操作"
             if key not in self._pending_choices and len(self._pending_choices) >= 256:
                 return False, "当前点歌请求较多，请稍后再试"
+            if old is not None:
+                self._drop_pending(key)
             self._pending_choices[key] = pending
         api = self._get_api()
         platforms = ["qq", "163"] if resolved == "auto" else [resolved]
@@ -435,24 +514,40 @@ class MusicPlugin(MaiBotPlugin):
         groups = await asyncio.gather(*(search_one(name) for name in platforms))
         # Round robin preserves each provider's ranking and shows both platforms on page one.
         seen = set()
+        recordings: dict[tuple[str, ...], int] = {}
         for i in range(max((len(group) for group in groups), default=0)):
             for group in groups:
                 if i < len(group):
                     song = group[i]
                     identity = (song.platform, song.song_id)
                     if identity not in seen:
-                        pending.results.append(song)
                         seen.add(identity)
+                        metadata = tuple(" ".join(value.casefold().split()) for value in
+                                         (song.name, song.artists, song.album))
+                        can_group = self.config.music.group_cross_platform_results and all(metadata)
+                        previous = recordings.get(metadata) if can_group else None
+                        if previous is not None and pending.results[previous - 1].platform != song.platform:
+                            variants = pending.alternatives.setdefault(previous, [])
+                            if not variants:
+                                variants.append(song)
+                                continue
+                        pending.results.append(song)
+                        if can_group:
+                            recordings.setdefault(metadata, len(pending.results))
         async with self._pending_lock:
             if self._pending_choices.get(key) is not pending:
                 return False, "该搜索已被更新或取消"
             if not pending.results:
                 del self._pending_choices[key]
                 return False, "音源搜索暂不可用，请稍后再试" if failures else "没有找到匹配歌曲，请换关键词或音源"
-        if len(pending.results) == 1 or self.config.music.auto_select_first:
+        if (len(pending.results) == 1 and not pending.alternatives) or self.config.music.auto_select_first:
             return await self._selection_action(stream_id, user_id, "select", index=1, send_mode=send_mode)
         try:
-            sent = bool(await self.ctx.send.text(self._format_results(pending), stream_id))
+            menu = self._format_results(pending)
+            if failures:
+                unavailable = "、".join("QQ 音乐" if name == "qq" else "网易云音乐" for name in sorted(failures))
+                menu += f"\n⚠️ {unavailable}暂时查不到结果，已列出其他平台的候选。"
+            sent = await self._send_selection_menu(key, pending, menu)
         except Exception:
             sent = False
         if not sent:
@@ -472,17 +567,18 @@ class MusicPlugin(MaiBotPlugin):
             self._clean_expired_pending()
             pending = self._pending_choices.get(key)
             if pending is None:
-                return False, "没有你的待选歌曲，列表可能已过期，请先点歌"
+                return False, f"没有找到你的待选歌曲，列表可能已过期。\n🔎 发送 {self.config.music.command_prefix}点歌 歌名 重新搜索"
             if pending.busy:
                 return False, "这首歌正在发送，请稍后再操作"
             if action == "cancel":
-                del self._pending_choices[key]
+                self._drop_pending(key)
                 return True, "已取消选歌"
             if action == "source":
                 query, mode = pending.query, pending.mode
             elif not pending.results:
                 return False, "正在搜索，请稍候"
             elif action in {"next", "previous"}:
+                old_page = pending.page
                 page = pending.page + (1 if action == "next" else -1)
                 if page < 0 or page * self.config.music.page_size >= len(pending.results):
                     return False, "已经是第一页" if page < 0 else "已经是最后一页"
@@ -495,16 +591,29 @@ class MusicPlugin(MaiBotPlugin):
                 except ValueError as exc:
                     return False, str(exc)
                 song = pending.results[index - 1]
+                if music_platform:
+                    try:
+                        platform = self._platform(music_platform)
+                    except ValueError as exc:
+                        return False, str(exc)
+                    options = [song, *pending.alternatives.get(index, [])]
+                    match = next((item for item in options if item.platform == platform), None)
+                    if match is None:
+                        return False, "该候选没有这个平台的版本，可以先换源搜索"
+                    song = match
                 pending.busy = True
             else:
                 return False, "不支持的选歌操作"
         if action == "source":
-            return await self._do_search_and_send(query, music_platform, stream_id, user_id=user_id, send_mode=mode)
+            return await self._do_search_and_send(query, music_platform, stream_id, user_id=user_id,
+                                                  send_mode=mode, transport=pending.transport)
         if action in {"next", "previous"}:
             try:
-                sent = bool(await self.ctx.send.text(self._format_results(pending), stream_id))
+                sent = await self._send_selection_menu(key, pending, self._format_results(pending))
             except Exception:
                 sent = False
+            if not sent:
+                pending.page = old_page
             return sent, "已更新候选页" if sent else "候选页发送失败，请重试翻页"
         try:
             sent = await self._send_song(song, stream_id, mode=mode, silent=True)
@@ -513,9 +622,14 @@ class MusicPlugin(MaiBotPlugin):
                 pending.busy = False
         async with self._pending_lock:
             if sent and self._pending_choices.get(key) is pending:
-                del self._pending_choices[key]
+                self._drop_pending(key)
+            self._clean_expired_pending()
         kind = {"voice": "语音", "card": "标准卡片或回退链接", "link": "歌曲链接"}[mode]
-        return (True, f"已发送{kind}：{song.display()}") if sent else (False, "发送失败，已保留候选；可重试或改用链接")
+        if sent:
+            return True, f"已发送{kind}\n🎵 {song.display()}"
+        if key not in self._pending_choices:
+            return False, f"「{song.name}」发送失败，列表已过期，请重新点歌。"
+        return False, f"「{song.name}」发送失败，已保留候选。\n🔁 回复 {index} 重试"
 
     @Tool("search_and_play_music", description=(
         "搜索音乐并列出候选，等待用户选歌。可指定音乐平台、歌手和本次发送方式；"
@@ -528,14 +642,15 @@ class MusicPlugin(MaiBotPlugin):
     async def handle_search_music(self, query: str = "", artist: str = "", music_platform: str = "",
                                    send_mode: str = "", stream_id: str = "", **kwargs: Any) -> dict[str, str]:
         ok, text = await self._do_search_and_send(" ".join(part for part in (query.strip(), artist.strip()) if part),
-            music_platform, stream_id, user_id=str(kwargs.get("user_id") or ""), send_mode=send_mode)
+            music_platform, stream_id, user_id=str(kwargs.get("user_id") or ""), send_mode=send_mode,
+            transport=str(kwargs.get("platform") or ""))
         return {"name": "search_and_play_music", "content": text, "status": "success" if ok else "failed"}
 
     @Tool("select_music", description="用户明确要求选第几首、翻页、换源或取消选歌时使用；只操作当前用户自己的候选。", parameters=[
         ToolParameterInfo(name="action", param_type=ToolParamType.STRING, description="select/next/previous/source/cancel", required=True),
         ToolParameterInfo(name="index", param_type=ToolParamType.INTEGER, description="整份候选列表中的序号，选择时必填", required=False),
         ToolParameterInfo(name="send_mode", param_type=ToolParamType.STRING, description="voice/card/link", required=False),
-        ToolParameterInfo(name="music_platform", param_type=ToolParamType.STRING, description="换源时指定auto/qq/163", required=False),
+        ToolParameterInfo(name="music_platform", param_type=ToolParamType.STRING, description="换源时指定 auto/qq/163，选择合并候选时可指定 qq/163", required=False),
     ])
     async def handle_select_music(self, action: str = "select", index: int = 0, send_mode: str = "",
                                    music_platform: str = "", stream_id: str = "", **kwargs: Any) -> dict[str, str]:
@@ -567,50 +682,76 @@ class MusicPlugin(MaiBotPlugin):
         else:
             args = rest.strip() if space else ""
         ok, result = await self._do_search_and_send(args, platform, stream_id,
-            user_id=str(kwargs.get("user_id") or ""), send_mode=mode)
+            user_id=str(kwargs.get("user_id") or ""), send_mode=mode,
+            transport=str(kwargs.get("platform") or ""))
         if not ok:
-            await self.ctx.send.text(result, stream_id)
+            await self.ctx.send.text(f"⚠️ {result}", stream_id)
         return ok, result, True
 
-    @Command("选歌", description="选歌、翻页、换源、取消和查看音源",
-        pattern=r"^(?P<pfx>\S)(?P<action>选歌|歌单|换源|取消选歌|音源)(?:\s+(?P<args>.*))?$")
+    def _queue_numeric_selection(self, stream_id: str, user_id: str, text: str) -> bool:
+        if not re.fullmatch(r"[0-9]{1,3}", text.strip()):
+            return False
+        self._clean_expired_pending()
+        key = (stream_id, user_id)
+        pending = self._pending_choices.get(key)
+        if pending is None or not pending.results:
+            return False
+        if pending.queued or pending.busy:
+            return True
+        pending.queued = True
+
+        async def select() -> None:
+            pending.queued = False
+            if self._pending_choices.get(key) is not pending:
+                return
+            try:
+                ok, result = await self._selection_action(stream_id, user_id, "select", index=int(text))
+                await self.ctx.send.text(f"{'✅' if ok else '⚠️'} {result}", stream_id)
+            except Exception:
+                self.ctx.logger.exception("数字选歌处理失败")
+
+        task = asyncio.create_task(select())
+        self._menu_tasks.add(task)
+        task.add_done_callback(self._menu_tasks.discard)
+        return True
+
+    @Command("歌单", description="翻页、换源、取消和查看音源",
+        pattern=r"^(?P<pfx>\S)(?P<action>歌单|换源|取消选歌|音源)(?:\s+(?P<args>.*))?$")
     async def handle_select_command(self, stream_id: str = "", **kwargs: Any) -> tuple[bool, str, bool]:
         prefix = self.config.music.command_prefix
         text = str(kwargs.get("text") or "")
         groups = kwargs.get("matched_groups") or {}
         if not groups:
-            match = re.fullmatch(r"(?P<pfx>\S)(?P<action>选歌|歌单|换源|取消选歌|音源)(?:\s+(?P<args>.*))?", text)
+            match = re.fullmatch(r"(?P<pfx>\S)(?P<action>歌单|换源|取消选歌|音源)(?:\s+(?P<args>.*))?", text)
             groups = match.groupdict() if match else {}
         if groups.get("pfx") != prefix:
             return False, "", False
         action, args = groups.get("action"), (groups.get("args") or "").strip()
         if action == "音源":
             bridge = "聚合接口优先，失败回退平台原接口" if self.config.source_bridge.enabled else "平台原接口"
-            message = (f"可选平台：QQ / 网易云 / 全部；默认：{self.config.music.default_platform}\n"
-                       f"获取途径：{bridge}。这里显示配置状态，不代表实时可用性。\n"
-                       f"{prefix}点歌 QQ 歌名 · {prefix}点歌 网易 歌名 · {prefix}换源 全部")
+            default = {"auto": "QQ 音乐 + 网易云音乐", "qq": "QQ 音乐", "163": "网易云音乐"}
+            label = default.get(self.config.music.default_platform, self.config.music.default_platform)
+            message = (f"🎧 点歌音源\n⭐ 默认搜索 {label}\n⚙️ {bridge}（配置状态）\n\n"
+                       f"🔎 {prefix}点歌 QQ 歌名\n🔎 {prefix}点歌 网易 歌名\n"
+                       f"🔄 已有候选时，发送 {prefix}换源 全部 重新搜索两个平台")
             await self.ctx.send.text(message, stream_id)
             return True, message, True
         params: dict[str, Any] = {}
-        if action == "选歌":
-            match = re.fullmatch(r"(\d{1,3})(?:\s+(\S+))?", args)
-            if not match:
-                await self.ctx.send.text(f"用法：{prefix}选歌 序号 [语音/卡片/链接]", stream_id)
-                return False, "选歌参数无效", True
-            params = {"index": int(match[1]), "send_mode": match[2] or ""}
-            verb = "select"
-        elif action == "取消选歌":
+        if action == "取消选歌":
             verb = "cancel"
         elif action == "换源":
             if not args:
-                await self.ctx.send.text("请选择QQ、网易云或全部", stream_id)
+                await self.ctx.send.text(f"🔄 请指定要换到的平台。\n{prefix}换源 QQ / 网易 / 全部（三选一）", stream_id)
                 return False, "缺少平台", True
             verb, params = "source", {"music_platform": args}
         else:
             verb = {"下一页": "next", "上一页": "previous", "next": "next", "previous": "previous"}.get(args, "")
+            if not verb:
+                await self.ctx.send.text(f"📄 请指定翻页方向。\n➡️ {prefix}歌单 下一页\n⬅️ {prefix}歌单 上一页", stream_id)
+                return False, "缺少有效翻页方向", True
         ok, result = await self._selection_action(stream_id, str(kwargs.get("user_id") or ""), verb, **params)
         if verb not in {"source", "next", "previous"} or not ok:
-            await self.ctx.send.text(result, stream_id)
+            await self.ctx.send.text(f"{'✅' if ok else '⚠️'} {result}", stream_id)
         return ok, result, True
 
 
@@ -703,11 +844,16 @@ class MusicPlugin(MaiBotPlugin):
     async def on_unload(self) -> None:
         """插件卸载，关闭 HTTP 客户端和缓存任务。"""
         try:
+            tasks = tuple(self._menu_tasks)
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
             await self._stop_audio_cache()
             if self._api is not None:
                 await self._api.close()
                 self._api = None
-            self._pending_choices.clear()
+            for key in list(self._pending_choices):
+                self._drop_pending(key)
         finally:
             if self._error_log is not None:
                 self._error_log.close()
@@ -721,7 +867,8 @@ class MusicPlugin(MaiBotPlugin):
             return
 
         async with self._pending_lock:
-            self._pending_choices.clear()
+            for key in list(self._pending_choices):
+                self._drop_pending(key)
         await self._stop_audio_cache()
         if self._api is not None:
             await self._api.close()
@@ -735,7 +882,7 @@ class MusicPlugin(MaiBotPlugin):
     @HookHandler(
         "chat.receive.after_process",
         name="music_url_parser",
-        description="解析音乐链接和音乐卡片，发送语音音频",
+        description="处理有效候选的数字回复，以及音乐链接和卡片",
         mode=HookMode.BLOCKING,
         order="normal",
         timeout_ms=15000,
@@ -757,6 +904,11 @@ class MusicPlugin(MaiBotPlugin):
             text = " ".join(parts).strip()
         if not text or not session_id:
             return {"action": "continue"}
+        info = message.get("message_info")
+        user = info.get("user_info") if isinstance(info, Mapping) else None
+        user_id = str(user.get("user_id") or "") if isinstance(user, Mapping) else ""
+        if user_id and self._queue_numeric_selection(session_id, user_id, text):
+            return {"action": "abort"}
         card = parse_music_card_text(text) if self.config.music.auto_parse_card else None
         if not self.config.music.auto_parse_url and card is None:
             return {"action": "continue"}

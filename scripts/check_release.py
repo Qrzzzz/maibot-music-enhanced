@@ -55,7 +55,7 @@ def check_tree(root: Path) -> dict:
         assert re.fullmatch(r"\d+\.\d+\.\d+", value), f"Invalid version: {value}"
         assert not {"99", "999"}.intersection(value.split(".")[:2]), f"Unsupported compatibility wildcard: {value}"
     assert manifest["urls"]["repository"] == "https://github.com/Qrzzzz/" + SLUG
-    assert set(manifest["capabilities"]) == {"send.text", "send.custom"}
+    assert set(manifest["capabilities"]) == {"send.text", "send.custom", "api.call"}
     config = tomllib.loads((root / "config.example.toml").read_text(encoding="utf-8"))
     assert config["plugin"]["config_version"] == manifest["version"]
     module = ast.parse((root / "plugin.py").read_text(encoding="utf-8"))

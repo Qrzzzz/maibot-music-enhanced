@@ -1,7 +1,7 @@
 # 首次安装复制为 config.toml；也可让 MaiBot 根据配置模型生成默认配置。
 [plugin]
 enabled = true
-config_version = "1.2.0"
+config_version = "1.2.1"
 
 [music]
 default_platform = "auto"     # auto 合并QQ/网易云；也可设 qq 或 163
@@ -10,6 +10,9 @@ auto_parse_url = false         # 分享链接不会默认触发语音
 auto_parse_card = false
 search_limit = 10              # 每个平台1–20首
 page_size = 5                  # 每页1–10首
+selection_timeout_seconds = 90 # 列表有效期，10–600秒
+auto_recall_selection = true   # 需要 SnowLuma 支持消息 ID 回执和撤回
+group_cross_platform_results = true # 合并歌名、歌手和专辑一致的跨平台候选
 auto_select_first = false      # 默认等待选歌；显式true则命令/工具均直接选第一首
 play_mode = "voice"            # voice / card / link；可按次覆盖
 voice_source = "local"         # local / remote；完整时长校验只在 local 模式生效

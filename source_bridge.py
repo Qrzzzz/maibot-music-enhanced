@@ -151,7 +151,8 @@ class SourceAwareSearchClient(MusicSearchClient):
             if not _matches_request(query, title, artists):
                 continue
             self._media_urls[(platform, sid)] = url
-            songs.append(SongInfo(sid, title, artists, '', platform))
+            album = item.get('album')
+            songs.append(SongInfo(sid, title, artists, album if isinstance(album, str) else '', platform))
         # Prefer exact titles, then query matches including artist names.
         needle = _normalized(query)
         def rank(song):

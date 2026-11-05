@@ -7,7 +7,7 @@
 | 项目 | 当前值 |
 | --- | --- |
 | 插件 ID | `github.qrzzzz.music-enhanced` |
-| 独立版本 | `1.2.0` |
+| 独立版本 | `1.2.1` |
 | 许可证 | GPL-3.0-only，保留原 MIT 声明及测试夹具的原 GPLv3-or-later 声明 |
 | 插件类型 | `tool`（命令及 LLM 点歌工具） |
 | 声明兼容范围 | MaiBot `1.3.15–1.3.99` / Plugin SDK `2.16.0–2.21.0` |
@@ -32,7 +32,8 @@
 - **本地语音 + 聚合源启用**时，对照平台歌曲 ID、标题、歌手和时长核验下载内容。时长容差为 `max(3 秒, 3%)`，明显试听或截短片段会被拒绝，不代表逐采样一致性校验。
 - FFmpeg 将非 MP3 音频实际转为 MP3；QQ 语音上传仍可能压缩音质。
 - 缓存默认上限 1 GB、24 小时未访问过期、单文件最多 50 MB，完整音频模式最多 30 分钟。
-- 默认关闭分享链接、卡片自动解析。命令与自然语言共用候选列表，多首结果默认等待用户选择；单首结果直接发送。候选按聊天与 Host 提供的用户身份隔离，5分钟有效，最多256个待选请求。
+- 默认关闭分享链接、卡片自动解析。多首候选默认等待发起人在原聊天回复数字，默认 90 秒内有效。只有一首且只有一个平台时直接发送。
+- 跨平台候选在歌名、歌手和专辑都一致时共用序号。字段缺失或版本标题不同时分别显示。回复数字使用列表中的优先平台。可先用 `/换源 网易` 或 `/换源 QQ` 限定平台。
 - **卡片模式**使用标准平台歌曲 ID；QQ MID 会通过平台详情补查数字 ID，二者独立保存。缺少数字 ID、查询失败或卡片投递失败时，明确提示并回退官方链接。不支持自定义签名卡片或交互按钮。
 - 分享解析仅使用 Host 已提供的文本和链接；缺少歌曲链接时提示补发，不另行调用客户端 `get_msg`，也不按模糊卡片标题自动换歌。
 
@@ -78,10 +79,7 @@ cache_reader_dir = "/app/music-cache"        # QQ 客户端可读
 | `/点歌 歌名` | 默认合并平台搜索，多首候选等待选择 |
 | `/点歌 qq 歌名` / `/点歌 网易 歌名` | 指定平台，不自动改用另一平台 |
 | `/点歌 歌名 --模式 卡片` | 设置本次默认方式，另支持语音、链接 |
-| `/选歌 2` | 使用本次默认方式发送第2首 |
-| `/选歌 2 语音` | 第2首以语音发送 |
-| `/选歌 2 卡片` | 第2首以标准音乐卡片发送，不可用时回退链接 |
-| `/选歌 2 链接` | 第2首只发送官方歌曲链接 |
+| `2` | 回复纯数字，按本次设定发送第 2 首 |
 | `/歌单 下一页` / `/歌单 上一页` | 翻页，序号保持连续 |
 | `/换源 网易` / `/换源 全部` | 保留查询词和发送方式，重新搜索 |
 | `/取消选歌` | 取消本人候选，其他用户不受影响 |
@@ -90,8 +88,8 @@ cache_reader_dir = "/app/music-cache"        # QQ 客户端可读
 ### 使用示例与规则
 
 ```text
-/点歌 晴天
-/选歌 2 卡片
+/点歌 晴天 --模式 卡片
+2
 
 /点歌 网易 晴天 --模式 链接
 /歌单 下一页
@@ -99,7 +97,7 @@ cache_reader_dir = "/app/music-cache"        # QQ 客户端可读
 /取消选歌
 ```
 
-候选序号按整份列表连续编号，翻页不重新从1计数；每人只操作自己的候选，5分钟内有效。单首候选直接发送；多首候选默认等待选择。卡片表示标准音乐卡片，不包含签名卡片或点击选歌按钮。
+翻页后序号连续。列表默认有效 90 秒，从首次发送成功起算。选歌成功、取消、到期、换源或翻页替换旧列表时，默认尝试撤回相应列表。自动撤回需要 SnowLuma 支持发送回执和撤回，且 QQ 仍允许撤回该条消息。无法取得消息 ID 或撤回失败时，仍可正常选歌，列表按设定到期。
 
 ### 自然语言指令
 
@@ -116,7 +114,10 @@ cache_reader_dir = "/app/music-cache"        # QQ 客户端可读
 | 配置 | 默认值 | 说明 |
 | --- | --- | --- |
 | `music.default_platform` | `auto` | auto 合并搜索，或指定 qq / 163 |
-| `music.play_mode` | `voice` | voice / card / link，可按次覆盖 |
+| `music.play_mode` | `voice` | voice / card / link，可在点歌时用 `--模式` 覆盖 |
+| `music.selection_timeout_seconds` | `90` | 候选有效期，支持 10–600 秒 |
+| `music.auto_recall_selection` | `true` | 自动撤回列表，需要 SnowLuma 支持 |
+| `music.group_cross_platform_results` | `true` | 合并歌名、歌手和专辑一致的跨平台候选 |
 | `music.voice_source` | `local` | 本地缓存，或 `remote` 远程 URL |
 | `music.auto_select_first` | `false` | true 则命令及工具均直接选首个候选 |
 | `music.search_limit` / `page_size` | `10` / `5` | 每平台最多20首，每页最多10首 |
@@ -145,7 +146,7 @@ python scripts/check_release.py
 已安装 MaiBot 的环境可运行 `python scripts/check_host.py`，验证官方加载器与隔离生命周期；它不发送 QQ 消息。
 
 ```powershell
-python scripts/prepare_release.py 1.2.1 --note "本次更新的具体说明"
+python scripts/prepare_release.py 1.2.2 --note "本次更新的具体说明"
 ```
 
 提交推送后，打开 [Release plugin](https://github.com/Qrzzzz/maibot-music-enhanced/actions/workflows/release.yml)，先运行 `dry_run=true`，通过后对同一提交运行 `false`。也支持推送匹配 manifest 的 `vX.Y.Z` 标签。完整发布、重跑和插件中心流程见 [RELEASING.md](docs/RELEASING.md)。
