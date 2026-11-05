@@ -29,6 +29,7 @@ REQUIRED = (
     "tests/test_host_routing.py", "tests/fixtures/adapters/provenance.json",
     "tests/fixtures/adapters/napcat_encoder.py", "tests/fixtures/adapters/unified_encoder.py",
     "docs/COMPATIBILITY.md",
+    "tests/test_selection.py",
 )
 FORBIDDEN_PARTS = {".git", ".venv", "venv", "__pycache__", ".pytest_cache", "data", "logs", "dist", "build"}
 FORBIDDEN_SUFFIXES = {".pyc", ".pyo", ".log", ".db", ".sqlite", ".sqlite3", ".mp3", ".m4a", ".flac", ".part", ".pem", ".key"}

@@ -183,6 +183,6 @@ async def test_tool_link_fallback_does_not_claim_audio_was_played():
     instance.set_plugin_config(config)
     song = module.SongInfo("song-mid", "Song", "Artist", "", "qq")
     instance._get_api = lambda: types.SimpleNamespace(search=AsyncMock(return_value=[song]))
-    result = await instance.handle_search_music(query="Song Artist", stream_id="stream")
-    assert "已发送歌曲卡片或链接" in result["content"] and "已播放" not in result["content"]
+    result = await instance.handle_search_music(query="Song Artist", music_platform="qq", stream_id="stream", user_id="alice")
+    assert "已发送标准卡片或回退链接" in result["content"] and "已播放" not in result["content"]
     instance.ctx.send.custom.assert_not_awaited()

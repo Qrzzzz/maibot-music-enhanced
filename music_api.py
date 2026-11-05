@@ -251,6 +251,7 @@ class SongInfo:
     platform: str  # "163" 或 "qq"
     media_id: str = ""  # QQ音乐的 strMediaMid（用于构造播放URL的filename）
     album_mid: str = ""  # QQ音乐的专辑 mid（用于构造封面URL的filename）
+    numeric_id: str = ""  # QQ标准音乐卡片的数字ID；不可与MID/media_mid混用
 
     def display(self) -> str:
         """返回可读的歌曲描述。"""
@@ -653,6 +654,7 @@ class MusicSearchClient:
                         platform="qq",
                         media_id=media_mid,
                         album_mid=album_mid,
+                        numeric_id=str(song.get("id") or song.get("songid") or ""),
                     )
                 )
         return results
@@ -759,6 +761,7 @@ class MusicSearchClient:
             platform="qq",
             media_id=media_mid,
             album_mid=album_mid,
+            numeric_id=str(track.get("id") or ""),
         )
 
     # ===== 获取音频 URL =====

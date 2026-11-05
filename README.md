@@ -7,18 +7,18 @@
 | 项目 | 当前值 |
 | --- | --- |
 | 插件 ID | `github.qrzzzz.music-enhanced` |
-| 独立版本 | `1.1.1` |
+| 独立版本 | `1.2.0` |
 | 许可证 | GPL-3.0-only，保留原 MIT 声明及测试夹具的原 GPLv3-or-later 声明 |
 | 插件类型 | `tool`（命令及 LLM 点歌工具） |
-| 声明兼容范围 | MaiBot `1.3.15–1.3.99` / Plugin SDK `2.16.0` |
+| 声明兼容范围 | MaiBot `1.3.15–1.3.99` / Plugin SDK `2.16.0–2.21.0` |
 | 推荐连接器 | 官方 [统一 QQ 适配器](https://github.com/Mai-with-u/MaiBot-SnowLuma-Adapter)，可连接 SnowLuma 或 NapCat |
 | 开发环境 | Windows、Python 3.12；CI 使用 Linux、Python 3.12 |
 
 [源码仓库](https://github.com/Qrzzzz/maibot-music-enhanced) · [Releases](https://github.com/Qrzzzz/maibot-music-enhanced/releases) · [Actions](https://github.com/Qrzzzz/maibot-music-enhanced/actions) · [兼容性与验收边界](docs/COMPATIBILITY.md)
 
-1.1.1 只调整插件分类和兼容声明，不改变 1.1.0 的双端发送路线。`1.3.99` 是允许同一 `1.3` 系列补丁更新的上限声明，不是已经实测的 Host 版本；实际加载验证仍为 MaiBot `1.3.15` / SDK `2.16.0`。SDK 超出声明范围时仍会被校验器阻止加载。
+1.2.0 统一命令与自然语言选歌，支持混合搜索、用户独立候选、翻页、换源、取消及本次发送方式。实际隔离 Host 加载验证使用 MaiBot `1.3.19` / SDK `2.21.0`；CI 分别验证 SDK `2.16.0` 与 `2.21.0`。`1.3.99` 是同系列补丁兼容策略上限，不代表已运行所有版本。
 
-## 1.1.0 的发送路线
+## 发送路线
 
 点歌请求 → 插件搜索和音频处理 → MaiBot SDK `send.custom` / `send.text` → Host → QQ 适配器 → SnowLuma 或 NapCat。
 
@@ -26,14 +26,14 @@
 
 ## 功能与边界
 
-- 默认 QQ 音乐优先；LLM 工具无可播放候选时尝试网易云。
+- 默认合并 QQ 与网易云搜索，交替展示两个平台的候选；指定平台时仅搜索该平台。一个平台查询失败仍展示另一个平台的结果。
 - `music.txqq.pro` 聚合搜索不可用时回退平台原接口。
 - 聚合源启用时过滤未请求的 cover/remix/live 等版本，并匹配指定歌手。
 - **本地语音 + 聚合源启用**时，对照平台歌曲 ID、标题、歌手和时长核验下载内容。时长容差为 `max(3 秒, 3%)`，明显试听或截短片段会被拒绝，不代表逐采样一致性校验。
 - FFmpeg 将非 MP3 音频实际转为 MP3；QQ 语音上传仍可能压缩音质。
 - 缓存默认上限 1 GB、24 小时未访问过期、单文件最多 50 MB，完整音频模式最多 30 分钟。
-- 默认关闭分享链接、卡片自动解析；自然语言点歌直接尝试候选，`/点歌` 也默认直接选取第一首。
-- **卡片模式**仅尝试适配器支持的标准平台歌曲 ID。QQ 搜索通常返回 MID，不能当作标准卡片所需的数字 ID，因此改发官方歌曲链接；标准卡片发送失败也回退链接。不再构造或直发自定义 CQ 音乐卡片。
+- 默认关闭分享链接、卡片自动解析。命令与自然语言共用候选列表，多首结果默认等待用户选择；单首结果直接发送。候选按聊天与 Host 提供的用户身份隔离，5分钟有效，最多256个待选请求。
+- **卡片模式**使用标准平台歌曲 ID；QQ MID 会通过平台详情补查数字 ID，二者独立保存。缺少数字 ID、查询失败或卡片投递失败时，明确提示并回退官方链接。不支持自定义签名卡片或交互按钮。
 - 分享解析仅使用 Host 已提供的文本和链接；缺少歌曲链接时提示补发，不另行调用客户端 `get_msg`，也不按模糊卡片标题自动换歌。
 
 可播放范围由平台权益、版权和音源可用性决定。`remote` 语音、卡片/链接模式或关闭 `source_bridge.enabled` 时，不经过本地完整时长核验。卡片和链接发送结果不会被表述为“已播放语音”。
@@ -73,19 +73,30 @@ cache_reader_dir = "/app/music-cache"        # QQ 客户端可读
 
 | 命令 | 作用 |
 | --- | --- |
-| `/点歌 歌名` | 使用默认平台搜索播放 |
-| `/点歌 qq 歌名` | 指定 QQ 音乐 |
-| `/点歌 163 歌名` | 指定网易云 |
-| `/选歌 1` | 关闭自动首选后选择列表歌曲 |
+| `/点歌 歌名` | 默认合并平台搜索，多首候选等待选择 |
+| `/点歌 qq 歌名` / `/点歌 网易 歌名` | 指定平台，不自动改用另一平台 |
+| `/点歌 歌名 --模式 卡片` | 设置本次默认方式，另支持语音、链接 |
+| `/选歌 2` / `/选歌 2 卡片` | 按整份列表序号选择，可覆盖发送方式 |
+| `/歌单 下一页` / `/歌单 上一页` | 翻页，序号保持连续 |
+| `/换源 网易` / `/换源 全部` | 保留查询词和发送方式，重新搜索 |
+| `/取消选歌` | 取消本人候选，其他用户不受影响 |
+| `/音源` | 查看平台、默认顺序和获取途径配置，不是实时健康检测 |
 
-LLM 工具内置换平台尝试；命令按指定平台执行。完整配置见 [config.example.toml](config.example.toml)。
+自然语言示例：“搜一下晴天，网易云的版本”“发第二首卡片”“下一页”“换成 QQ”。两个工具分别为 `search_and_play_music` 与 `select_music`。Host 的 `platform` 字段表示聊天平台，因此音乐平台参数专门命名为 `music_platform`，避免覆盖。工具不接受模型指定用户 ID；用户身份只取 Host 上下文。缺少身份时拒绝建立共享候选。
+
+搜索失败、序号无效或歌曲发送失败不会被报告为成功。选中歌曲失败后保留候选，可改用链接；不会悄悄改播另一个版本。发送进行中拒绝同一用户重复选择、换源和取消，避免重复投递。
+
+升级说明：旧配置里的 `auto_select_first=true`、默认平台和发送方式会被保留。若从旧版本升级后仍直接播第一首，请在配置面板将 `music.auto_select_first` 改为 `false`；混合搜索设置 `music.default_platform="auto"`。本机可能仍使用标识为 `github.pan-ice.music` 的旧本地增强版，部署本独立插件前应停用旧插件，不能同时注册同名工具。
+
+完整配置见 [config.example.toml](config.example.toml)。
 
 | 配置 | 默认值 | 说明 |
 | --- | --- | --- |
-| `music.default_platform` | `qq` | LLM 工具优先搜索的平台 |
-| `music.play_mode` | `voice` | 语音，或 `card` 标准卡片/链接 |
+| `music.default_platform` | `auto` | auto 合并搜索，或指定 qq / 163 |
+| `music.play_mode` | `voice` | voice / card / link，可按次覆盖 |
 | `music.voice_source` | `local` | 本地缓存，或 `remote` 远程 URL |
-| `music.auto_select_first` | `true` | 命令直接选取首个候选 |
+| `music.auto_select_first` | `false` | true 则命令及工具均直接选首个候选 |
+| `music.search_limit` / `page_size` | `10` / `5` | 每平台最多20首，每页最多10首 |
 | `music.auto_parse_url` / `auto_parse_card` | `false` | 分享消息自动解析开关 |
 | `music.cache_storage_dir` / `cache_reader_dir` | 空 | 写入路径及客户端读取路径 |
 | `source_bridge.enabled` | `true` | 聚合源及本地完整音频处理 |
@@ -111,7 +122,7 @@ python scripts/check_release.py
 已安装 MaiBot 的环境可运行 `python scripts/check_host.py`，验证官方加载器与隔离生命周期；它不发送 QQ 消息。
 
 ```powershell
-python scripts/prepare_release.py 1.1.2 --note "本次更新的具体说明"
+python scripts/prepare_release.py 1.2.1 --note "本次更新的具体说明"
 ```
 
 提交推送后，打开 [Release plugin](https://github.com/Qrzzzz/maibot-music-enhanced/actions/workflows/release.yml)，先运行 `dry_run=true`，通过后对同一提交运行 `false`。也支持推送匹配 manifest 的 `vX.Y.Z` 标签。完整发布、重跑和插件中心流程见 [RELEASING.md](docs/RELEASING.md)。

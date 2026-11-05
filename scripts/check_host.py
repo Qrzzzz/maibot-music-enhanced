@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 async def check() -> dict:
+    import maibot_sdk
     from maibot_sdk.context import PluginContext, PluginPaths
     from src.plugin_runtime import detect_host_application_version
     from src.plugin_runtime.runner.manifest_validator import ManifestValidator
@@ -56,6 +57,7 @@ async def check() -> dict:
     plugin.set_plugin_config(plugin.get_default_config())
     components = plugin.get_components()
     assert any(c.get("name") == "search_and_play_music" for c in components)
+    assert any(c.get("name") == "select_music" for c in components)
     try:
         await plugin.on_load()
         assert plugin._audio_cache.storage_dir == data_dir / "audio_cache"
@@ -66,6 +68,7 @@ async def check() -> dict:
         await plugin.on_unload()
     assert plugin._audio_cache is None and plugin._api is None and not rpc_calls
     return {"status": "passed", "plugin_id": manifest.id, "version": manifest.version, "host_version": host_version,
+            "sdk_version": maibot_sdk.__version__,
             "plugin_type": metadata.plugin_type, "host_range": manifest_data["host_application"],
             "version_range_checks_only": compatibility_checks,
             "manifest_validated_by_host": True, "official_loader_passed": True,

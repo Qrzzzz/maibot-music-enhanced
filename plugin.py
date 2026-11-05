@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-only
 # Portions Copyright (c) 2026 磐冰, originally under MIT; see licenses/maibot-music-MIT.txt.
-# Modifications Copyright (c) 2026 Qrzzzz. Modified 2026-10-27.
+# Modifications Copyright (c) 2026 Qrzzzz. Modified 2026-11-05.
 """麦麦点歌增强 — 基于 maibot-music 的独立维护版本。"""
 
 from __future__ import annotations
@@ -9,6 +9,7 @@ import asyncio
 import re
 import shutil
 import time
+from dataclasses import dataclass, field
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal
@@ -23,7 +24,7 @@ from .music_api import MusicAPIResponseError, SongInfo
 from .source_bridge import SourceAwareSearchClient as MusicSearchClient
 from .url_parser import extract_urls, parse_music_card_text, parse_music_url
 
-PLUGIN_VERSION = "1.1.1"
+PLUGIN_VERSION = "1.2.0"
 
 
 # ===== 配置模型 =====
@@ -48,20 +49,21 @@ class MusicConfig(PluginConfigBase):
     __ui_order__ = 1
 
     default_platform: str = Field(
-        default="qq",
-        description="默认音乐平台: 163(网易云) 或 qq(QQ音乐)",
+        default="auto",
+        description="默认平台: auto(合并QQ和网易云)、163(网易云) 或 qq(QQ音乐)",
     )
     command_prefix: str = Field(default="/", description="命令前缀符号，如 / 或 #")
     auto_parse_url: bool = Field(default=False, description="是否自动解析音乐链接")
     auto_parse_card: bool = Field(default=False, description="是否自动解析音乐卡片")
-    search_limit: int = Field(default=5, description="搜索结果数量")
+    search_limit: int = Field(default=10, ge=1, le=20, description="每个平台搜索结果数（1–20）")
+    page_size: int = Field(default=5, ge=1, le=10, description="每页候选数量")
     auto_select_first: bool = Field(
-        default=True,
+        default=False,
         description="搜索到多首歌曲时是否跳过选歌阶段，直接发送第一首",
     )
-    play_mode: Literal["voice", "card"] = Field(
+    play_mode: Literal["voice", "card", "link"] = Field(
         default="voice",
-        description="播放模式: voice(语音音频) 或 card(音乐卡片)",
+        description="默认发送方式: voice(语音)、card(标准卡片，失败回退链接)、link(链接)",
     )
     voice_source: Literal["local", "remote"] = Field(
         default="local",
@@ -137,6 +139,18 @@ class MusicPluginConfig(PluginConfigBase):
 _PENDING_TTL = 300
 
 
+@dataclass
+class PendingSelection:
+    query: str
+    platform: str
+    mode: str = ""
+    results: list[SongInfo] = field(default_factory=list)
+    page: int = 0
+    created: float = field(default_factory=time.monotonic)
+    busy: bool = False
+    owner_id: str = ""
+
+
 # ===== 插件主类 =====
 
 
@@ -154,14 +168,15 @@ class MusicPlugin(MaiBotPlugin):
         self._voice_send_condition = asyncio.Condition()
         self._active_voice_sends = 0
         self._stopping_audio_cache = False
-        # key: stream_id（等于消息的 session_id）, value: (结果列表, 平台, 创建时间戳)
-        self._pending_choices: dict[str, tuple[list[SongInfo], str, float]] = {}
+        # User identity is supplied by Host, never accepted as an LLM tool parameter.
+        self._pending_choices: dict[tuple[str, str], PendingSelection] = {}
         self._pending_lock = asyncio.Lock()
 
     def _clean_expired_pending(self) -> None:
         """清理已过期的待选状态。"""
         now = time.monotonic()
-        expired = [sid for sid, (_, _, ts) in self._pending_choices.items() if now - ts > _PENDING_TTL]
+        expired = [sid for sid, item in self._pending_choices.items()
+                   if not item.busy and now - item.created > _PENDING_TTL]
         for sid in expired:
             del self._pending_choices[sid]
 
@@ -208,7 +223,8 @@ class MusicPlugin(MaiBotPlugin):
 
     async def _start_audio_cache(self) -> None:
         """按当前配置初始化语音音频缓存。"""
-        if self.config.music.play_mode != "voice" or self.config.music.voice_source != "local":
+        # Per-request voice is available even when the default mode is card/link.
+        if self.config.music.voice_source != "local":
             async with self._voice_send_condition:
                 self._stopping_audio_cache = False
                 self._voice_send_condition.notify_all()
@@ -219,7 +235,7 @@ class MusicPlugin(MaiBotPlugin):
 
         if self.config.source_bridge.enabled:
             missing = [name for name in ("ffmpeg", "ffprobe") if not shutil.which(name)]
-            if missing:
+            if missing and self.config.music.play_mode == "voice":
                 raise AudioCacheError("完整音频模式缺少 " + ", ".join(missing) + "，请安装 FFmpeg 并加入 PATH")
 
         storage_dir = (
@@ -295,64 +311,27 @@ class MusicPlugin(MaiBotPlugin):
             except Exception:
                 self.ctx.logger.exception("清理音乐缓存失败")
 
+    @staticmethod
+    def _platform(value: str) -> str:
+        aliases = {"auto": "auto", "全部": "auto", "自动": "auto", "all": "auto",
+                   "qq": "qq", "qq音乐": "qq", "qqmusic": "qq",
+                   "163": "163", "网易": "163", "网易云": "163", "网易云音乐": "163", "netease": "163"}
+        key = value.strip().lower()
+        if key not in aliases:
+            raise ValueError("平台请选择 QQ、网易云或全部")
+        return aliases[key]
+
     def _resolve_platform(self, platform: str = "") -> str:
-        """解析音乐平台，优先使用传入值，否则使用配置默认值。
+        return self._platform(platform or self.config.music.default_platform)
 
-        Args:
-            platform: 传入的平台标识。
-
-        Returns:
-            有效的平台标识 ("163" 或 "qq")。
-        """
-        p = platform.strip().lower()
-        if p in ("163", "qq"):
-            return p
-        if p in ("网易", "netease", "网易云音乐"):
-            return "163"
-        if p in ("qq音乐", "qqmusic"):
-            return "qq"
-        default = self.config.music.default_platform.strip().lower()
-        return default if default in ("163", "qq") else "163"
-
-    def _format_results(self, results: list[SongInfo]) -> str:
-        """将搜索结果格式化为供用户选择的文本。
-
-        Args:
-            results: 搜索结果列表。
-
-        Returns:
-            格式化的选择文本。
-        """
-        pfx = self.config.music.command_prefix
-        lines = ["🎵 搜索结果："]
-        for i, song in enumerate(results, 1):
-            artist_part = f" - {song.artists}" if song.artists else ""
-            lines.append(f"  {i}. {song.name}{artist_part}")
-        lines.append(f"使用 {pfx}选歌 <序号> 选择歌曲，如 {pfx}选歌 1")
-        return "\n".join(lines)
-
-    async def _send_music_card(self, song: SongInfo, stream_id: str, *, silent: bool = False) -> bool:
-        """Use Host-supported platform cards; otherwise send a public song link through Host.
-
-        QQ search returns song MID, while native QQ cards require a numeric ID.
-        Custom CQ/music cards and direct client HTTP are intentionally unsupported.
-        """
-        del silent
-        numeric_id = song.song_id.isascii() and song.song_id.isdecimal()
-        if song.platform in {"qq", "163"} and numeric_id:
-            try:
-                if await self.ctx.send.custom("music", {"type": song.platform, "id": song.song_id}, stream_id):
-                    return True
-            except Exception:
-                self.ctx.logger.warning("平台音乐卡片不可用，改发歌曲链接: %s %s", song.platform, song.song_id)
-        link = self._public_song_url(song)
-        if not link:
-            return False
-        try:
-            return bool(await self.ctx.send.text(f"{song.display() or '歌曲链接'}\n{link}", stream_id))
-        except Exception:
-            self.ctx.logger.warning("歌曲链接发送失败: %s %s", song.platform, song.song_id)
-            return False
+    def _mode(self, value: str = "") -> str:
+        aliases = {"voice": "voice", "语音": "voice", "card": "card", "卡片": "card",
+                   "link": "link", "链接": "link", "文本": "link"}
+        if not value or value == "auto":
+            return self.config.music.play_mode
+        if value.lower() not in aliases:
+            raise ValueError("发送方式请选择语音、卡片或链接")
+        return aliases[value.lower()]
 
     @staticmethod
     def _public_song_url(song: SongInfo) -> str:
@@ -362,6 +341,277 @@ class MusicPlugin(MaiBotPlugin):
         if song.platform == "163":
             return f"https://music.163.com/song?id={song_id}"
         return ""
+
+    async def _send_song_link(self, song: SongInfo, stream_id: str, *, fallback: bool = False) -> bool:
+        link = self._public_song_url(song)
+        if not link:
+            return False
+        note = "标准音乐卡片不可用，已改发歌曲链接。\n" if fallback else ""
+        try:
+            return bool(await self.ctx.send.text(f"{note}{song.display()}\n{link}", stream_id))
+        except Exception:
+            self.ctx.logger.warning("歌曲链接发送失败: %s %s", song.platform, song.song_id)
+            return False
+
+    async def _send_music_card(self, song: SongInfo, stream_id: str, *, silent: bool = False) -> bool:
+        """Only standard cards through Host; never bypass the adapter with client APIs."""
+        del silent
+        card_id = song.numeric_id if song.platform == "qq" else song.song_id
+        if song.platform == "qq" and not card_id:
+            if song.song_id.isascii() and song.song_id.isdecimal():
+                card_id = song.song_id
+            else:
+                try:
+                    detail = await self._get_api().get_qq_song_detail(song.song_id)
+                    if detail and detail.song_id == song.song_id:
+                        card_id = detail.numeric_id
+                except Exception:
+                    self.ctx.logger.warning("QQ卡片歌曲ID查询失败，回退链接")
+        if song.platform in {"qq", "163"} and card_id.isascii() and card_id.isdecimal():
+            try:
+                if await self.ctx.send.custom("music", {"type": song.platform, "id": card_id}, stream_id):
+                    return True
+            except Exception:
+                self.ctx.logger.warning("平台音乐卡片不可用，改发歌曲链接")
+        return await self._send_song_link(song, stream_id, fallback=True)
+
+    def _format_results(self, pending: PendingSelection) -> str:
+        size = self.config.music.page_size
+        start = pending.page * size
+        pages = (len(pending.results) + size - 1) // size
+        lines = [f"🎵 {pending.query} · 第 {pending.page + 1}/{pages} 页 · 发起人 {pending.owner_id}"]
+        for i, song in enumerate(pending.results[start:start + size], start + 1):
+            platform = "QQ" if song.platform == "qq" else "网易云"
+            lines.append(f"{i}. [{platform}] {song.display()}")
+        pfx = self.config.music.command_prefix
+        lines.extend([f"{pfx}选歌 {start + 1} [语音/卡片/链接]（本次默认：{self._mode(pending.mode)}）",
+                      f"{pfx}歌单 下一页 / 上一页 · {pfx}换源 QQ/网易/全部 · {pfx}取消选歌",
+                      "候选仅供发起人选择，5分钟内有效；序号按整份列表编号。"])
+        return "\n".join(lines)
+
+    async def _do_search_and_send(self, query: str, platform: str = "", stream_id: str = "",
+                                  *, user_id: str = "", send_mode: str = "") -> tuple[bool, str]:
+        if not stream_id or not user_id:
+            return False, "Host 未提供聊天或用户身份，请由本人使用点歌命令，不能建立共享选歌列表"
+        if not query.strip() or len(query) > 200:
+            return False, "请提供1–200字的歌曲名或歌手"
+        try:
+            resolved = self._resolve_platform(platform)
+            self._mode(send_mode)
+        except ValueError as exc:
+            return False, str(exc)
+        key = (stream_id, user_id)
+        pending = PendingSelection(query.strip(), resolved, send_mode, owner_id=user_id)
+        async with self._pending_lock:
+            self._clean_expired_pending()
+            old = self._pending_choices.get(key)
+            if old and old.busy:
+                return False, "这首歌正在发送，请稍后再操作"
+            if key not in self._pending_choices and len(self._pending_choices) >= 256:
+                return False, "当前点歌请求较多，请稍后再试"
+            self._pending_choices[key] = pending
+        api = self._get_api()
+        platforms = ["qq", "163"] if resolved == "auto" else [resolved]
+        failures = []
+        groups = []
+
+        async def search_one(name: str) -> list[SongInfo]:
+            try:
+                return await asyncio.wait_for(api.search(pending.query, name,
+                    limit=self.config.music.search_limit), timeout=25)
+            except MusicAPIResponseError as exc:
+                failures.append(name)
+                self.ctx.logger.error("音乐搜索失败(%s): %s", name, exc)
+                if self._error_log is not None:
+                    self._error_log.error("音乐搜索失败(%s): %s", name, exc.diagnostic_message())
+                return []
+            except Exception as exc:
+                failures.append(name)
+                self.ctx.logger.exception("音乐搜索异常(%s)", name)
+                if self._error_log is not None:
+                    self._error_log.exception("音乐搜索异常: platform=%s error=%s", name, type(exc).__name__)
+                return []
+
+        groups = await asyncio.gather(*(search_one(name) for name in platforms))
+        # Round robin preserves each provider's ranking and shows both platforms on page one.
+        seen = set()
+        for i in range(max((len(group) for group in groups), default=0)):
+            for group in groups:
+                if i < len(group):
+                    song = group[i]
+                    identity = (song.platform, song.song_id)
+                    if identity not in seen:
+                        pending.results.append(song)
+                        seen.add(identity)
+        async with self._pending_lock:
+            if self._pending_choices.get(key) is not pending:
+                return False, "该搜索已被更新或取消"
+            if not pending.results:
+                del self._pending_choices[key]
+                return False, "音源搜索暂不可用，请稍后再试" if failures else "没有找到匹配歌曲，请换关键词或音源"
+        if len(pending.results) == 1 or self.config.music.auto_select_first:
+            return await self._selection_action(stream_id, user_id, "select", index=1, send_mode=send_mode)
+        try:
+            sent = bool(await self.ctx.send.text(self._format_results(pending), stream_id))
+        except Exception:
+            sent = False
+        if not sent:
+            async with self._pending_lock:
+                if self._pending_choices.get(key) is pending:
+                    del self._pending_choices[key]
+            return False, "候选列表发送失败，请重新点歌"
+        suffix = "；部分音源查询失败，可稍后换源重试" if failures else ""
+        return True, f"已列出{len(pending.results)}首候选，请等待用户选择，不要自动替用户选歌{suffix}"
+
+    async def _selection_action(self, stream_id: str, user_id: str, action: str, *, index: int = 0,
+                                 send_mode: str = "", music_platform: str = "") -> tuple[bool, str]:
+        if not user_id or not stream_id:
+            return False, "Host 未提供用户身份，无法选择歌曲"
+        key = (stream_id, user_id)
+        async with self._pending_lock:
+            self._clean_expired_pending()
+            pending = self._pending_choices.get(key)
+            if pending is None:
+                return False, "没有你的待选歌曲，列表可能已过期，请先点歌"
+            if pending.busy:
+                return False, "这首歌正在发送，请稍后再操作"
+            if action == "cancel":
+                del self._pending_choices[key]
+                return True, "已取消选歌"
+            if action == "source":
+                query, mode = pending.query, pending.mode
+            elif not pending.results:
+                return False, "正在搜索，请稍候"
+            elif action in {"next", "previous"}:
+                page = pending.page + (1 if action == "next" else -1)
+                if page < 0 or page * self.config.music.page_size >= len(pending.results):
+                    return False, "已经是第一页" if page < 0 else "已经是最后一页"
+                pending.page = page
+            elif action == "select":
+                if not isinstance(index, int) or isinstance(index, bool) or not 1 <= index <= len(pending.results):
+                    return False, f"序号超出范围，请输入1–{len(pending.results)}"
+                try:
+                    mode = self._mode(send_mode or pending.mode)
+                except ValueError as exc:
+                    return False, str(exc)
+                song = pending.results[index - 1]
+                pending.busy = True
+            else:
+                return False, "不支持的选歌操作"
+        if action == "source":
+            return await self._do_search_and_send(query, music_platform, stream_id, user_id=user_id, send_mode=mode)
+        if action in {"next", "previous"}:
+            try:
+                sent = bool(await self.ctx.send.text(self._format_results(pending), stream_id))
+            except Exception:
+                sent = False
+            return sent, "已更新候选页" if sent else "候选页发送失败，请重试翻页"
+        try:
+            sent = await self._send_song(song, stream_id, mode=mode, silent=True)
+        finally:
+            async with self._pending_lock:
+                pending.busy = False
+        async with self._pending_lock:
+            if sent and self._pending_choices.get(key) is pending:
+                del self._pending_choices[key]
+        kind = {"voice": "语音", "card": "标准卡片或回退链接", "link": "歌曲链接"}[mode]
+        return (True, f"已发送{kind}：{song.display()}") if sent else (False, "发送失败，已保留候选；可重试或改用链接")
+
+    @Tool("search_and_play_music", description=(
+        "搜索音乐并列出候选，等待用户选歌。可指定音乐平台、歌手和本次发送方式；"
+        "不要自动替用户选择候选，也不要失败后重复调用。"), parameters=[
+        ToolParameterInfo(name="query", param_type=ToolParamType.STRING, description="歌曲名", required=True),
+        ToolParameterInfo(name="artist", param_type=ToolParamType.STRING, description="指定歌手，可留空", required=False),
+        ToolParameterInfo(name="music_platform", param_type=ToolParamType.STRING, description="auto/qq/163，留空用默认值", required=False),
+        ToolParameterInfo(name="send_mode", param_type=ToolParamType.STRING, description="voice/card/link，留空用默认值", required=False),
+    ])
+    async def handle_search_music(self, query: str = "", artist: str = "", music_platform: str = "",
+                                   send_mode: str = "", stream_id: str = "", **kwargs: Any) -> dict[str, str]:
+        ok, text = await self._do_search_and_send(" ".join(part for part in (query.strip(), artist.strip()) if part),
+            music_platform, stream_id, user_id=str(kwargs.get("user_id") or ""), send_mode=send_mode)
+        return {"name": "search_and_play_music", "content": text, "status": "success" if ok else "failed"}
+
+    @Tool("select_music", description="用户明确要求选第几首、翻页、换源或取消选歌时使用；只操作当前用户自己的候选。", parameters=[
+        ToolParameterInfo(name="action", param_type=ToolParamType.STRING, description="select/next/previous/source/cancel", required=True),
+        ToolParameterInfo(name="index", param_type=ToolParamType.INTEGER, description="整份候选列表中的序号，选择时必填", required=False),
+        ToolParameterInfo(name="send_mode", param_type=ToolParamType.STRING, description="voice/card/link", required=False),
+        ToolParameterInfo(name="music_platform", param_type=ToolParamType.STRING, description="换源时指定auto/qq/163", required=False),
+    ])
+    async def handle_select_music(self, action: str = "select", index: int = 0, send_mode: str = "",
+                                   music_platform: str = "", stream_id: str = "", **kwargs: Any) -> dict[str, str]:
+        if action == "source" and not music_platform:
+            return {"name": "select_music", "content": "换源需要指定平台", "status": "failed"}
+        ok, text = await self._selection_action(stream_id, str(kwargs.get("user_id") or ""), action,
+            index=index, send_mode=send_mode, music_platform=music_platform)
+        return {"name": "select_music", "content": text, "status": "success" if ok else "failed"}
+
+    @Command("点歌", description="搜索音乐，支持平台与 --模式 语音/卡片/链接",
+             pattern=r"^(?P<pfx>\S)点歌\s+(?P<args>.+)$")
+    async def handle_music_command(self, stream_id: str = "", **kwargs: Any) -> tuple[bool, str, bool]:
+        text = str(kwargs.get("text") or "")
+        groups = kwargs.get("matched_groups") or {}
+        prefix = self.config.music.command_prefix
+        if groups.get("pfx", text[:1]) != prefix:
+            return False, "", False
+        args = str(groups.get("args") or text[len(prefix + "点歌"):]).strip()
+        mode = ""
+        if " --模式 " in args:
+            args, mode = args.rsplit(" --模式 ", 1)
+            mode = mode.strip()
+        first, space, rest = args.partition(" ")
+        platform = ""
+        try:
+            platform = self._platform(first)
+        except ValueError:
+            pass
+        else:
+            args = rest.strip() if space else ""
+        ok, result = await self._do_search_and_send(args, platform, stream_id,
+            user_id=str(kwargs.get("user_id") or ""), send_mode=mode)
+        if not ok:
+            await self.ctx.send.text(result, stream_id)
+        return ok, result, True
+
+    @Command("选歌", description="选歌、翻页、换源、取消和查看音源",
+        pattern=r"^(?P<pfx>\S)(?P<action>选歌|歌单|换源|取消选歌|音源)(?:\s+(?P<args>.*))?$")
+    async def handle_select_command(self, stream_id: str = "", **kwargs: Any) -> tuple[bool, str, bool]:
+        prefix = self.config.music.command_prefix
+        text = str(kwargs.get("text") or "")
+        groups = kwargs.get("matched_groups") or {}
+        if not groups:
+            match = re.fullmatch(r"(?P<pfx>\S)(?P<action>选歌|歌单|换源|取消选歌|音源)(?:\s+(?P<args>.*))?", text)
+            groups = match.groupdict() if match else {}
+        if groups.get("pfx") != prefix:
+            return False, "", False
+        action, args = groups.get("action"), (groups.get("args") or "").strip()
+        if action == "音源":
+            bridge = "聚合接口优先，失败回退平台原接口" if self.config.source_bridge.enabled else "平台原接口"
+            message = (f"可选平台：QQ / 网易云 / 全部；默认：{self.config.music.default_platform}\n"
+                       f"获取途径：{bridge}。这里显示配置状态，不代表实时可用性。\n"
+                       f"{prefix}点歌 QQ 歌名 · {prefix}点歌 网易 歌名 · {prefix}换源 全部")
+            await self.ctx.send.text(message, stream_id)
+            return True, message, True
+        params: dict[str, Any] = {}
+        if action == "选歌":
+            match = re.fullmatch(r"(\d{1,3})(?:\s+(\S+))?", args)
+            if not match:
+                await self.ctx.send.text(f"用法：{prefix}选歌 序号 [语音/卡片/链接]", stream_id)
+                return False, "选歌参数无效", True
+            params = {"index": int(match[1]), "send_mode": match[2] or ""}
+            verb = "select"
+        elif action == "取消选歌":
+            verb = "cancel"
+        elif action == "换源":
+            if not args:
+                await self.ctx.send.text("请选择QQ、网易云或全部", stream_id)
+                return False, "缺少平台", True
+            verb, params = "source", {"music_platform": args}
+        else:
+            verb = {"下一页": "next", "上一页": "previous", "next": "next", "previous": "previous"}.get(args, "")
+        ok, result = await self._selection_action(stream_id, str(kwargs.get("user_id") or ""), verb, **params)
+        if verb not in {"source", "next", "previous"} or not ok:
+            await self.ctx.send.text(result, stream_id)
+        return ok, result, True
 
 
     async def _send_voice_audio(self, song: SongInfo, stream_id: str, *, silent: bool = False) -> bool:
@@ -418,9 +668,12 @@ class MusicPlugin(MaiBotPlugin):
                 await audio_cache.release(cache_path)
             await self._release_voice_send()
 
-    async def _send_song(self, song: SongInfo, stream_id: str, *, silent: bool = False) -> bool:
+    async def _send_song(self, song: SongInfo, stream_id: str, *, silent: bool = False, mode: str = "") -> bool:
         """发送歌曲语音音频或音乐卡片，根据 play_mode 配置分发。"""
-        if self.config.music.play_mode == "card":
+        mode = self._mode(mode)
+        if mode == "link":
+            return await self._send_song_link(song, stream_id)
+        if mode == "card":
             return await self._send_music_card(song, stream_id, silent=silent)
 
         try:
@@ -467,256 +720,14 @@ class MusicPlugin(MaiBotPlugin):
         if scope != "self":
             return
 
+        async with self._pending_lock:
+            self._pending_choices.clear()
         await self._stop_audio_cache()
         if self._api is not None:
             await self._api.close()
             self._api = None
         await self._start_audio_cache()
         self.ctx.logger.info("音乐插件配置已更新，API 客户端和音乐缓存已重置")
-
-    # ===== 搜索核心逻辑 =====
-
-    async def _do_search_and_send(
-        self,
-        query: str,
-        platform: str = "",
-        stream_id: str = "",
-    ) -> tuple[bool, str]:
-        """搜索歌曲并发送，供 Tool 和 Command 共用。
-
-        Args:
-            query: 搜索关键词。
-            platform: 平台标识（可为空，使用默认值）。
-            stream_id: 目标消息流 ID。
-
-        Returns:
-            (成功与否, 描述文本) 元组。
-        """
-        resolved_platform = self._resolve_platform(platform)
-        api = self._get_api()
-
-        try:
-            results = await api.search(query, resolved_platform, limit=self.config.music.search_limit)
-        except MusicAPIResponseError as exc:
-            self.ctx.logger.error("音乐搜索失败: %s", exc)
-            if self._error_log is not None:
-                self._error_log.error("音乐搜索失败: %s", exc.diagnostic_message())
-            await self.ctx.send.text("搜索歌曲时出错，请稍后再试", stream_id)
-            return False, "搜索歌曲时出错，请稍后再试"
-        except Exception as exc:
-            self.ctx.logger.exception("音乐搜索异常: %s", query)
-            if self._error_log is not None:
-                self._error_log.exception(
-                    "音乐搜索异常: platform=%s query=%r error=%r",
-                    resolved_platform,
-                    query,
-                    exc,
-                )
-            await self.ctx.send.text("搜索歌曲时出错，请稍后再试", stream_id)
-            return False, "搜索歌曲时出错，请稍后再试"
-
-        if not results:
-            platform_name = "网易云音乐" if resolved_platform == "163" else "QQ音乐"
-            msg = f"在{platform_name}上未找到「{query}」相关歌曲"
-            await self.ctx.send.text(msg, stream_id)
-            return False, msg
-
-        # 只有一首结果时直接发送
-        if len(results) == 1:
-            sent = await self._send_song(results[0], stream_id)
-            return sent, f"已发送: {results[0].display()}" if sent else f"发送失败: {results[0].display()}"
-
-        # 多首结果时，根据配置决定是否跳过选歌阶段直接发送第一首
-        if self.config.music.auto_select_first:
-            sent = await self._send_song(results[0], stream_id)
-            return sent, f"已发送: {results[0].display()}" if sent else f"发送失败: {results[0].display()}"
-
-        # 多首结果时列出选择
-        async with self._pending_lock:
-            self._pending_choices[stream_id] = (results, resolved_platform, time.monotonic())
-        text = self._format_results(results)
-        await self.ctx.send.text(text, stream_id)
-        return True, f"找到{len(results)}首歌曲，已列出供用户选择"
-
-    # ===== Tool 组件 =====
-
-    @Tool(
-        "search_and_play_music",
-        description=(
-            "搜索歌曲并发送语音音频。当用户想听歌、点歌、搜歌、找歌时使用此工具。"
-            "不要指定platform参数，让插件自动选择可用平台。"
-            "本工具已内置重试和换源逻辑，如果返回播放失败，不要重复调用，直接告诉用户结果即可。"
-        ),
-        parameters=[
-            ToolParameterInfo(
-                name="query",
-                param_type=ToolParamType.STRING,
-                description="歌曲名或关键词",
-                required=True,
-            ),
-        ],
-    )
-    async def handle_search_music(
-        self,
-        query: str = "",
-        stream_id: str = "",
-        **kwargs: Any,
-    ) -> dict[str, str]:
-        """搜索歌曲并直接播放。
-
-        与命令不同，Tool 调用时直接播放最佳匹配，不走"列出候选→用户选歌"流程。
-        默认平台播放失败时自动换另一个平台重试，多首候选逐个尝试。
-        """
-        del kwargs
-        _TOOL_NAME = "search_and_play_music"
-
-        if not query.strip():
-            return {"name": _TOOL_NAME, "content": "请提供歌曲名或关键词"}
-
-        default = self._resolve_platform("")
-        alt_platform = "163" if default == "qq" else "qq"
-        ordered_platforms = [default, alt_platform]
-        api = self._get_api()
-
-        # 依次尝试：配置默认平台 → AI 指定平台 → 备选平台
-        for try_platform in ordered_platforms:
-            try:
-                results = await api.search(query, try_platform, limit=self.config.music.search_limit)
-            except MusicAPIResponseError as exc:
-                self.ctx.logger.error("音乐搜索失败(%s): %s", try_platform, exc)
-                if self._error_log is not None:
-                    self._error_log.error(
-                        "音乐搜索失败(%s): %s",
-                        try_platform,
-                        exc.diagnostic_message(),
-                    )
-                continue
-            except Exception as exc:
-                self.ctx.logger.exception("音乐搜索异常(%s): %s", try_platform, query)
-                if self._error_log is not None:
-                    self._error_log.exception(
-                        "音乐搜索异常: platform=%s query=%r error=%r",
-                        try_platform,
-                        query,
-                        exc,
-                    )
-                continue
-
-            if not results:
-                continue
-
-            # 逐个尝试候选歌曲，直到成功播放一首
-            for song in results:
-                sent = await self._send_song(song, stream_id, silent=True)
-                if sent:
-                    kind = "已发送语音" if self.config.music.play_mode == "voice" else "已发送歌曲卡片或链接"
-                    return {"name": _TOOL_NAME, "content": f"{kind}: {song.display()}"}
-
-        return {
-            "name": _TOOL_NAME,
-            "content": (
-                f"已尝试在网易云音乐和QQ音乐搜索「{query}」，未找到能核验为完整歌曲的可播放音频，可能受试听、版权或音源故障影响。"
-                "请不要重复调用本工具，直接告知用户当前无法播放即可。"
-            ),
-        }
-
-    # ===== Command 组件 =====
-
-    @Command(
-        "点歌",
-        description="点歌命令，搜索歌曲并列出选择",
-        pattern=r"^(?P<pfx>\S)点歌(?:\s+(?P<platform>163|qq|网易云音乐|网易|netease|qq音乐|qqmusic))?\s+(?P<query>.+)$",
-    )
-    async def handle_music_command(self, stream_id: str = "", **kwargs: Any) -> tuple[bool, str, bool]:
-        """处理点歌命令。"""
-        matched_groups = kwargs.get("matched_groups")
-        if not isinstance(matched_groups, dict):
-            matched_groups = {}
-
-        pfx = str(matched_groups.get("pfx", "") or "")
-        configured_pfx = self.config.music.command_prefix
-        if pfx and pfx != configured_pfx:
-            return False, "", False
-
-        platform_hint = str(matched_groups.get("platform", "") or "").strip()
-        query = str(matched_groups.get("query", "") or "").strip()
-
-        # 如果 matched_groups 没有分组信息，尝试从原始消息解析
-        if not query:
-            raw_text = str(kwargs.get("text", "") or kwargs.get("message", "") or "")
-            epfx = re.escape(configured_pfx)
-            match = re.match(
-                rf"^{epfx}点歌(?:\s+(?P<platform>163|qq|网易云音乐|网易|netease|qq音乐|qqmusic))?\s+(?P<query>.+)$",
-                raw_text,
-                re.DOTALL,
-            )
-            if match:
-                platform_hint = platform_hint or (match.group("platform") or "")
-                query = match.group("query") or ""
-
-        if not query:
-            await self.ctx.send.text(f"用法：{configured_pfx}点歌 [163|qq] <歌曲名>", stream_id)
-            return False, "缺少歌曲名", True
-
-        success, message = await self._do_search_and_send(query, platform_hint, stream_id)
-        return success, message, True
-
-    @Command(
-        "选歌",
-        description="选择搜索结果中的歌曲",
-        pattern=r"^(?P<pfx>\S)选歌\s+(?P<index>\d+)$",
-    )
-    async def handle_select_command(self, stream_id: str = "", **kwargs: Any) -> tuple[bool, str, bool]:
-        """处理选歌命令。"""
-        matched_groups = kwargs.get("matched_groups")
-        if not isinstance(matched_groups, dict):
-            matched_groups = {}
-
-        pfx = str(matched_groups.get("pfx", "") or "")
-        configured_pfx = self.config.music.command_prefix
-        if pfx and pfx != configured_pfx:
-            return False, "", False
-
-        index_str = str(matched_groups.get("index", "") or "").strip()
-
-        if not index_str:
-            raw_text = str(kwargs.get("text", "") or kwargs.get("message", "") or "")
-            epfx = re.escape(configured_pfx)
-            match = re.match(rf"^{epfx}选歌\s+(?P<index>\d+)$", raw_text)
-            if match:
-                index_str = match.group("index")
-
-        if not index_str:
-            await self.ctx.send.text(f"用法：{configured_pfx}选歌 <序号>", stream_id)
-            return False, "缺少序号", True
-
-        # 查找待选状态
-        self._clean_expired_pending()
-        async with self._pending_lock:
-            pending = self._pending_choices.pop(stream_id, None)
-            if pending is None:
-                await self.ctx.send.text(f"没有待选的歌曲，请先使用 {configured_pfx}点歌 搜索", stream_id)
-                return False, "无待选歌曲", True
-
-            results, _platform, _ts = pending
-
-            try:
-                index = int(index_str)
-            except ValueError:
-                await self.ctx.send.text("请输入有效的数字序号", stream_id)
-                # 放回待选状态
-                self._pending_choices[stream_id] = pending
-                return False, "序号无效", True
-
-            if index < 1 or index > len(results):
-                await self.ctx.send.text(f"序号超出范围，请输入 1~{len(results)} 之间的数字", stream_id)
-                # 放回待选状态
-                self._pending_choices[stream_id] = pending
-                return False, "序号超出范围", True
-
-        song = results[index - 1]
-        await self._send_song(song, stream_id)
-        return True, f"已选择: {song.display()}", True
 
     # ===== EventHandler 组件 =====
 
