@@ -41,6 +41,10 @@ class AudioCacheError(Exception):
     """音频缓存操作失败。"""
 
 
+class AudioUnavailable(AudioCacheError):
+    """当前平台未提供可用的完整音频，尚未尝试投递。"""
+
+
 @dataclass(frozen=True)
 class _MpegFrameInfo:
     """MPEG Layer III 帧头信息。"""

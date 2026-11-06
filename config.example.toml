@@ -1,7 +1,7 @@
 # 首次安装复制为 config.toml；也可让 MaiBot 根据配置模型生成默认配置。
 [plugin]
 enabled = true
-config_version = "1.2.1"
+config_version = "1.3.0"
 
 [music]
 default_platform = "auto"     # auto 合并QQ/网易云；也可设 qq 或 163

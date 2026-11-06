@@ -380,6 +380,65 @@ async def test_matching_cross_platform_metadata_groups_but_keeps_platform_and_ve
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", ["unavailable", "unconfirmed", "timeout", "explicit"])
+async def test_grouped_voice_switches_platform_only_before_delivery(scenario):
+    p, api, songs = setup(1)
+    primary = songs[0]
+    primary.media_id = "qq-media"
+    alternate = module.SongInfo("400", primary.name, primary.artists, primary.album, "163")
+    config = p.get_default_config()
+    config["music"]["voice_source"] = "remote"
+    p.set_plugin_config(config)
+    p._send_song = types.MethodType(module.MusicPlugin._send_song, p)
+    api.search.side_effect = [[primary], [alternate]]
+    api.get_song_url = AsyncMock(return_value="https://example.invalid/audio")
+    if scenario in {"unavailable", "explicit"}:
+        api.get_song_url.side_effect = [None, "https://example.invalid/alternate"]
+    elif scenario == "unconfirmed":
+        p.ctx.send.custom.return_value = False
+    else:
+        p.ctx.send.custom.side_effect = TimeoutError
+    assert (await p._do_search_and_send("Song", "auto", "group", user_id="alice"))[0]
+    ok, message = await p._selection_action(
+        "group", "alice", "select", index=1, music_platform="qq" if scenario == "explicit" else "")
+    platforms = [call.args[1] for call in api.get_song_url.await_args_list]
+    if scenario == "unavailable":
+        assert ok and "已改用网易云音乐" in message
+        assert platforms == ["qq", "163"]
+        p.ctx.send.custom.assert_awaited_once_with("voiceurl", {"url": "https://example.invalid/alternate"}, "group")
+        p.ctx.send.text.reset_mock()
+        assert p._queue_recent_delivery("group", "alice", "链接")
+        await asyncio.gather(*p._menu_tasks)
+        assert "music.163.com/song?id=400" in p.ctx.send.text.await_args.args[0]
+    else:
+        assert not ok and platforms == ["qq"]
+        assert p.ctx.send.custom.await_count == (0 if scenario == "explicit" else 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("reply", "mode"), [("链接", "link"), ("卡片", "card")])
+async def test_followup_after_failed_selection_is_scoped_and_retires_menu(reply, mode):
+    p, _, songs = setup()
+    await search(p)
+    p._send_song.return_value = False
+    ok, result = await p._selection_action("group", "alice", "select", index=2)
+    assert not ok and "回复「链接」或「卡片」" in result
+    p._send_song.return_value = True
+    message = {"session_id": "group", "processed_plain_text": reply,
+               "message_info": {"user_info": {"user_id": "bob"}}}
+    assert await p.handle_music_url_parse(message=message) == {"action": "continue"}
+    message["message_info"]["user_info"]["user_id"] = "alice"
+    assert await p.handle_music_url_parse(message=message) == {"action": "abort"}
+    assert await p.handle_music_url_parse(message=message) == {"action": "abort"}
+    await asyncio.gather(*p._menu_tasks)
+    assert p._send_song.await_count == 2
+    p._send_song.assert_awaited_with(songs[1], "group", mode=mode, silent=True)
+    assert ("group", "alice") not in p._pending_choices
+    p._recent_selections[("group", "alice")].created -= 91
+    assert await p.handle_music_url_parse(message=message) == {"action": "continue"}
+
+
+@pytest.mark.asyncio
 async def test_card_default_initializes_cache_for_per_request_voice(tmp_path, monkeypatch):
     p = plugin()
     p._ctx.paths = types.SimpleNamespace(data_dir=tmp_path)

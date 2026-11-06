@@ -24,7 +24,7 @@ from weakref import WeakValueDictionary
 
 import httpx
 
-from .audio_cache import AudioCacheError, MusicAudioCache
+from .audio_cache import AudioCacheError, AudioUnavailable, MusicAudioCache
 from .media_urls import allowed_media_url as _allowed_media_url
 from .music_api import MusicAPIResponseError, MusicSearchClient, SongInfo
 
@@ -69,7 +69,7 @@ def _check_duration(actual: float, expected: float) -> None:
         raise AudioCacheError('无法核验歌曲完整时长')
     tolerance = max(3.0, expected * .03)
     if actual < expected - tolerance:
-        raise AudioCacheError(f'音源只有 {actual:.1f} 秒，歌曲标称 {expected:.1f} 秒，跳过试听或截短片段')
+        raise AudioUnavailable(f'音源只有 {actual:.1f} 秒，歌曲标称 {expected:.1f} 秒，跳过试听或截短片段')
     if actual > expected + tolerance:
         raise AudioCacheError('音频时长与歌曲详情不符，跳过不匹配版本')
 
@@ -262,7 +262,7 @@ class SourceAwareSearchClient(MusicSearchClient):
                 return await cache.get_or_download(platform, song.song_id, '')
             url = await self.get_song_url(song.song_id, song.platform, song.media_id, mp3_only=False)
             if not url:
-                raise AudioCacheError('音源未返回可用音频')
+                raise AudioUnavailable('音源未返回可用音频')
             fd, temporary = tempfile.mkstemp(prefix='.full-audio-', suffix='.part', dir=cache.storage_dir)
             os.close(fd)
             downloaded = Path(temporary)
