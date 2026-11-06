@@ -379,6 +379,29 @@ class MusicSearchClient:
             return await self.search_qq(query, limit)
         return await self.search_netease(query, limit)
 
+    async def get_netease_origin_types(self, song_ids: list[str]) -> dict[str, int]:
+        """Fetch explicit original/cover classifications for NetEase song IDs."""
+        ids = {song_id for song_id in song_ids if song_id.isascii() and song_id.isdecimal()}
+        if not ids:
+            return {}
+        response = await self._netease_client.get(
+            "https://music.163.com/api/song/detail",
+            params={"ids": json.dumps(sorted(int(song_id) for song_id in ids))},
+        )
+        response.raise_for_status()
+        data = response.json()
+        songs = data.get("songs") if isinstance(data, dict) else None
+        if not isinstance(songs, list):
+            return {}
+        origins = {}
+        for song in songs:
+            if isinstance(song, dict):
+                song_id = str(song.get("id"))
+                origin = song.get("originCoverType")
+                if song_id in ids and type(origin) is int and origin in (1, 2):
+                    origins[song_id] = origin
+        return origins
+
     async def search_netease(self, query: str, limit: int = 5) -> list[SongInfo]:
         """搜索网易云音乐。
 

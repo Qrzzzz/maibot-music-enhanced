@@ -16,7 +16,8 @@ def setup(count=3):
     p.ctx.logger.error = Mock()
     p._error_log = types.SimpleNamespace(error=Mock(), exception=Mock())
     songs = [module.SongInfo(str(i + 100), f"Song {i}", "Artist", "Album", "qq") for i in range(count)]
-    api = types.SimpleNamespace(search=AsyncMock(return_value=songs))
+    api = types.SimpleNamespace(search=AsyncMock(return_value=songs),
+                                get_netease_origin_types=AsyncMock(return_value={}))
     p._get_api = lambda: api
     p._send_song = AsyncMock(return_value=True)
     return p, api, songs
@@ -36,6 +37,26 @@ async def test_default_waits_and_includes_metadata_and_controls():
     assert "发起人 alice" in menu
     assert "/换源" in menu and "/取消选歌" in menu
     p._send_song.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lookup_fails", [False, True])
+async def test_origin_badges_keep_platform_attribution_and_optional_lookup(lookup_fails):
+    p, api, songs = setup(1)
+    matched = module.SongInfo("200", songs[0].name, "Artist", "Album", "163")
+    cover = module.SongInfo("201", songs[0].name, "Another singer", "", "163")
+    unknown = module.SongInfo("202", "Unknown track", "Artist", "", "163")
+    api.search.side_effect = [songs, [matched, cover, unknown]]
+    api.get_netease_origin_types.return_value = {"200": 1, "201": 2}
+    if lookup_fails:
+        api.get_netease_origin_types.side_effect = TimeoutError
+    assert (await p._do_search_and_send("Song", "auto", "group", user_id="alice"))[0]
+    api.get_netease_origin_types.assert_awaited_once_with(["200", "201", "202"])
+    menu = p.ctx.send.text.await_args.args[0]
+    assert "1. [QQ / 网易云] Song 0 - Artist (Album)" in menu
+    assert "3. [网易云] Unknown track - Artist\n" in menu
+    assert ("🌟 原曲（网易云）" in menu) is not lookup_fails
+    assert ("🎙️ 翻唱" in menu) is not lookup_fails
 
 
 @pytest.mark.asyncio

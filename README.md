@@ -7,7 +7,7 @@
 | 项目 | 当前值 |
 | --- | --- |
 | 插件 ID | `github.qrzzzz.music-enhanced` |
-| 独立版本 | `1.3.0` |
+| 独立版本 | `1.3.1` |
 | 许可证 | GPL-3.0-only，保留原 MIT 声明及测试夹具的原 GPLv3-or-later 声明 |
 | 插件类型 | `tool`（命令及 LLM 点歌工具） |
 | 声明兼容范围 | MaiBot `1.3.15–1.3.99` / Plugin SDK `2.16.0–2.21.0` |
@@ -33,6 +33,7 @@
 - FFmpeg 将非 MP3 音频实际转为 MP3；QQ 语音上传仍可能压缩音质。
 - 缓存默认上限 1 GB、24 小时未访问过期、单文件最多 50 MB，完整音频模式最多 30 分钟。
 - 默认关闭分享链接、卡片自动解析。多首候选默认等待发起人在原聊天回复数字，默认 90 秒内有效。只有一首且只有一个平台时直接发送。
+- 网易云候选会按歌曲详情显示 `🌟 原曲` 或 `🎙️ 翻唱`。合并候选会注明标签来自网易云。平台未分类或查询失败时按原顺序显示候选。
 - 跨平台候选在歌名、歌手和专辑都一致时共用序号。字段缺失或版本标题不同时分别显示。自动平台模式下，如果首选平台没有可用音频，或只有试听片段，语音发送前会尝试同一候选的另一平台。换源成功会显示实际平台。可用 `/换源 网易` 或 `/换源 QQ` 限定平台。
 - **卡片模式**使用标准平台歌曲 ID；QQ MID 会通过平台详情补查数字 ID，二者独立保存。缺少数字 ID、查询失败或卡片投递失败时，明确提示并回退官方链接。不支持自定义签名卡片或交互按钮。
 - 分享解析仅使用 Host 已提供的文本和链接；缺少歌曲链接时提示补发，不另行调用客户端 `get_msg`，也不按模糊卡片标题自动换歌。
@@ -147,7 +148,7 @@ python scripts/check_release.py
 已安装 MaiBot 的环境可运行 `python scripts/check_host.py`，验证官方加载器与隔离生命周期；它不发送 QQ 消息。
 
 ```powershell
-python scripts/prepare_release.py 1.3.1 --note "本次更新的具体说明"
+python scripts/prepare_release.py 1.3.2 --note "本次更新的具体说明"
 ```
 
 提交推送后，打开 [Release plugin](https://github.com/Qrzzzz/maibot-music-enhanced/actions/workflows/release.yml)，先运行 `dry_run=true`，通过后对同一提交运行 `false`。也支持推送匹配 manifest 的 `vX.Y.Z` 标签。完整发布、重跑和插件中心流程见 [RELEASING.md](docs/RELEASING.md)。

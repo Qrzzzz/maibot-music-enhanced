@@ -49,6 +49,19 @@ def make_client() -> MusicSearchClient:
 
 
 @pytest.mark.asyncio
+async def test_netease_origin_types_batches_ids_and_ignores_unknown_or_unrequested_values():
+    client = make_client()
+    client._netease_client.get.return_value = FakeResponse({"songs": [
+        {"id": 1, "originCoverType": 1}, {"id": 2, "originCoverType": 2},
+        {"id": 3, "originCoverType": 0}, {"id": 4, "originCoverType": True},
+        {"id": 5}, {"id": 9, "originCoverType": 1},
+    ]})
+    assert await client.get_netease_origin_types(["2", "1", "1", "3", "4", "5", "qq-mid"]) == {"1": 1, "2": 2}
+    client._netease_client.get.assert_awaited_once_with(
+        "https://music.163.com/api/song/detail", params={"ids": "[1, 2, 3, 4, 5]"})
+
+
+@pytest.mark.asyncio
 async def test_qq_detail_preserves_standard_card_id_separately_from_mid():
     client = make_client()
     client._qq_client.post.return_value = FakeResponse({"code": 0, "req_0": {"code": 0,

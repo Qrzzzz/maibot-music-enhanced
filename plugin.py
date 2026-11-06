@@ -24,7 +24,7 @@ from .music_api import MusicAPIResponseError, SongInfo
 from .source_bridge import SourceAwareSearchClient as MusicSearchClient
 from .url_parser import extract_urls, parse_music_card_text, parse_music_url
 
-PLUGIN_VERSION = "1.3.0"
+PLUGIN_VERSION = "1.3.1"
 
 
 # ===== 配置模型 =====
@@ -150,6 +150,7 @@ class PendingSelection:
     owner_id: str = ""
     transport: str = ""
     alternatives: dict[int, list[SongInfo]] = field(default_factory=dict)
+    netease_origins: dict[str, int] = field(default_factory=dict)
     menu_id: str = ""
     expiry: asyncio.TimerHandle | None = None
     queued: bool = False
@@ -464,9 +465,18 @@ class MusicPlugin(MaiBotPlugin):
                  f"📄 第 {pending.page + 1}/{pages} 页 · 共 {len(pending.results)} 首 · 发起人 {pending.owner_id}", ""]
         for i, song in enumerate(pending.results[start:start + size], start + 1):
             platform = "QQ" if song.platform == "qq" else "网易云"
-            if i in pending.alternatives:
+            alternatives = pending.alternatives.get(i, [])
+            if alternatives:
                 platform = "QQ / 网易云"
-            lines.append(f"{i}. [{platform}] {song.display()}")
+            netease = next((item for item in (song, *alternatives) if item.platform == "163"), None)
+            origin = pending.netease_origins.get(netease.song_id) if netease else None
+            badge = {1: "🌟 原曲", 2: "🎙️ 翻唱"}.get(origin)
+            line = f"{i}. [{platform}] {song.display()}"
+            if badge:
+                line += f" · {badge}"
+                if alternatives:
+                    line += "（网易云）"
+            lines.append(line)
         pfx = self.config.music.command_prefix
         lines.extend(["", f"▶️ 直接回复数字 {start + 1}（本次发{mode_label}）"])
         if pending.page > 0:
@@ -509,7 +519,6 @@ class MusicPlugin(MaiBotPlugin):
         api = self._get_api()
         platforms = ["qq", "163"] if resolved == "auto" else [resolved]
         failures = []
-        groups = []
 
         async def search_one(name: str) -> list[SongInfo]:
             try:
@@ -529,6 +538,15 @@ class MusicPlugin(MaiBotPlugin):
                 return []
 
         groups = await asyncio.gather(*(search_one(name) for name in platforms))
+        if self._pending_choices.get(key) is not pending:
+            return False, "该搜索已被更新或取消"
+        if not self.config.music.auto_select_first and sum(map(len, groups)) > 1:
+            ids = [song.song_id for group in groups for song in group if song.platform == "163"]
+            if ids:
+                try:
+                    pending.netease_origins = await asyncio.wait_for(api.get_netease_origin_types(ids), timeout=2)
+                except Exception as exc:
+                    self.ctx.logger.warning("网易云版本标签查询失败: %s", type(exc).__name__)
         # Round robin preserves each provider's ranking and shows both platforms on page one.
         seen = set()
         recordings: dict[tuple[str, ...], int] = {}
