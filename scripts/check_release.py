@@ -21,7 +21,7 @@ REQUIRED = (
     "url_parser.py", "error_log.py", "__init__.py", "LICENSE", "NOTICE.md", "README.md",
     "CHANGELOG.md", "UPSTREAM.json", "config.example.toml", "requirements.txt",
     "requirements-dev.txt", "pyproject.toml", "licenses/maibot-music-MIT.txt",
-    "licenses/astrbot_plugin_music-GPL-3.0.txt", "docs/RELEASING.md", "docs/VALIDATION.md",
+    "licenses/astrbot_plugin_music-GPL-3.0.txt", "docs/RELEASING.md",
     "scripts/check_release.py", "scripts/build_release.py", "scripts/check_host.py",
     "tests/test_source_bridge.py", "tests/test_distribution.py",
     "scripts/release.py", "scripts/prepare_release.py", ".github/workflows/release.yml",
