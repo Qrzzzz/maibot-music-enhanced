@@ -89,6 +89,22 @@ async def test_metadata_mismatch_prevents_download():
 
 
 @pytest.mark.asyncio
+async def test_native_version_keeps_base_identity_and_supplies_media_mid_for_fallback():
+    client = bridge.SourceAwareSearchClient(thirdparty_enabled=True)
+    client._qq_client.post = AsyncMock(return_value=httpx.Response(200,
+        request=httpx.Request('POST', 'https://u.y.qq.com/'), json={'req_0': {'data': {'track_info': {
+            'mid': 'right', 'name': 'Song', 'title': 'Song (Live)', 'interval': 240,
+            'singer': [{'name': 'Artist'}], 'file': {'media_mid': 'media-right'}}}}}))
+    song = bridge.SongInfo('right', 'Song', 'Artist', '', 'qq', title='Song (Live)')
+    try:
+        assert await client._expected_duration(song) == 240
+        assert song.name == 'Song' and song.media_id == 'media-right'
+        assert 'Song (Live)' in song.display()
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 async def test_source_failure_falls_back_to_official(monkeypatch):
     client = bridge.SourceAwareSearchClient(thirdparty_enabled=True)
     client._search_public = AsyncMock(side_effect=httpx.ConnectError('unavailable'))
@@ -99,6 +115,64 @@ async def test_source_failure_falls_back_to_official(monkeypatch):
         assert result[0].song_id == '123'
         fallback.assert_awaited_once()
     finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_native_fallback_filters_versions_using_display_title(monkeypatch):
+    client = bridge.SourceAwareSearchClient(thirdparty_enabled=True)
+    client._search_public = AsyncMock(return_value=[])
+    live = bridge.SongInfo('live', 'Song', 'Artist', '', 'qq', title='Song (Live)')
+    studio = bridge.SongInfo('studio', 'Song', 'Artist', '', 'qq', title='Song')
+    monkeypatch.setattr(bridge.MusicSearchClient, 'search', AsyncMock(return_value=[live, studio]))
+    try:
+        assert await client.search('Song Artist', 'qq') == [studio]
+        assert live in await client.search('Song Live Artist', 'qq')
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('native_outcome', ['success', 'missing', 'forbidden', 'truncated', 'untrusted'])
+async def test_expired_aggregator_url_is_evicted_and_native_retry_is_bounded(tmp_path, m4a_file, monkeypatch, native_outcome):
+    client, cache = await prepare_test_client(tmp_path, m4a_file, 240 if native_outcome == 'truncated' else 2)
+    del client.get_song_url
+    expired = 'https://aqqmusic.tc.qq.com/expired.m4a'
+    fresh = 'https://aqqmusic.tc.qq.com/fresh.m4a'
+    client._media_urls[('qq', 'right')] = expired
+    native = AsyncMock(return_value=None if native_outcome == 'missing' else
+                       'http://127.0.0.1/internal' if native_outcome == 'untrusted' else fresh)
+    monkeypatch.setattr(bridge.MusicSearchClient, 'get_song_url', native)
+    requests = []
+
+    def handler(request):
+        requests.append(str(request.url))
+        if str(request.url) == expired or native_outcome == 'forbidden':
+            return httpx.Response(403)
+        return httpx.Response(200, content=m4a_file.read_bytes())
+
+    del client._download_media
+    await client._public_client.aclose()
+    client._public_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    song = bridge.SongInfo('right', 'Song', 'Artist', '', 'qq')
+    try:
+        if native_outcome == 'success':
+            path = await client.prepare_local_audio(song, cache)
+            assert (await bridge.probe_audio(path))[1] == 'mp3'
+            await cache.release(path)
+        else:
+            with pytest.raises((bridge.AudioCacheError, httpx.HTTPStatusError)):
+                await client.prepare_local_audio(song, cache)
+            assert not list(cache.storage_dir.iterdir()) and not cache._active_paths
+        assert ('qq', 'right') not in client._media_urls
+        native.assert_awaited_once_with('right', 'qq', '', mp3_only=False)
+        assert requests == ([expired] if native_outcome in {'missing', 'untrusted'} else [expired, fresh])
+        if native_outcome != 'success':
+            with pytest.raises((bridge.AudioCacheError, httpx.HTTPStatusError)):
+                await client.prepare_local_audio(song, cache)
+            assert requests.count(expired) == 1
+    finally:
+        await cache.close()
         await client.close()
 
 

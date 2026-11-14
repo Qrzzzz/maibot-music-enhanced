@@ -126,7 +126,7 @@ class SourceAwareSearchClient(MusicSearchClient):
                 logger.warning('聚合音源不可用，回退平台接口: platform=%s error=%s', platform, type(exc).__name__)
         songs = await super().search(query, platform, limit)
         if self.thirdparty_enabled:
-            return [s for s in songs if _matches_request(query, s.name, s.artists)]
+            return [s for s in songs if _matches_request(query, s.title or s.name, s.artists)]
         return songs
 
     async def _search_public(self, query: str, platform: str, limit: int) -> list[SongInfo]:
@@ -224,6 +224,10 @@ class SourceAwareSearchClient(MusicSearchClient):
             raise AudioCacheError('音源歌手与平台详情不符')
         if expected <= 0 or expected > 1800:
             raise AudioCacheError('歌曲缺少有效时长或超过 30 分钟')
+        if song.platform == 'qq' and not song.media_id:
+            file_info = track.get('file')
+            if isinstance(file_info, dict):
+                song.media_id = str(file_info.get('media_mid') or '')
         return expected
 
     async def _download_media(self, url: str, path: Path, platform: str, max_bytes: int):
@@ -268,7 +272,18 @@ class SourceAwareSearchClient(MusicSearchClient):
             downloaded = Path(temporary)
             converted = downloaded.with_name(downloaded.name + '.mp3.part')
             try:
-                await self._download_media(url, downloaded, song.platform, cache.max_file_size_bytes)
+                try:
+                    await self._download_media(url, downloaded, song.platform, cache.max_file_size_bytes)
+                except httpx.HTTPError:
+                    # An aggregation URL can expire while the user is choosing a song.
+                    # Retry the same platform/ID once through its native resolver.
+                    if self._media_urls.get(key) != url:
+                        raise
+                    self._media_urls.pop(key, None)
+                    url = await super().get_song_url(song.song_id, song.platform, song.media_id, mp3_only=False)
+                    if not url:
+                        raise AudioUnavailable('聚合音频地址失效，原平台未返回可用音频')
+                    await self._download_media(url, downloaded, song.platform, cache.max_file_size_bytes)
                 actual, codec = await probe_audio(downloaded)
                 _check_duration(actual, expected)
                 if codec == 'mp3' and cache._is_valid_cache_file(downloaded):

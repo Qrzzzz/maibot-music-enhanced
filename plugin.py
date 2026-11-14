@@ -24,7 +24,14 @@ from .music_api import MusicAPIResponseError, SongInfo
 from .source_bridge import SourceAwareSearchClient as MusicSearchClient
 from .url_parser import extract_urls, parse_music_card_text, parse_music_url
 
-PLUGIN_VERSION = "1.3.1"
+PLUGIN_VERSION = "1.3.2"
+
+
+class MusicCardDeliveryUnknown(RuntimeError):
+    """Host may have delivered a card, but no definitive result was received."""
+
+    def __init__(self) -> None:
+        super().__init__("音乐卡片投递结果未知，请先查看聊天。需要改发时回复「链接」，不会自动补发。")
 
 
 # ===== 配置模型 =====
@@ -229,7 +236,8 @@ class MusicPlugin(MaiBotPlugin):
     def _expire_menu(self, key: tuple[str, str], pending: PendingSelection) -> None:
         if self._pending_choices.get(key) is pending:
             if pending.busy:
-                self._recall_menu(pending.menu_id)
+                if pending.transport == "qq":
+                    self._recall_menu(pending.menu_id)
                 pending.menu_id = ""
             else:
                 self._drop_pending(key)
@@ -247,12 +255,13 @@ class MusicPlugin(MaiBotPlugin):
         sent = bool(receipt.get("sent")) if isinstance(receipt, Mapping) else bool(receipt)
         if not sent:
             return False
-        message_id = (str(receipt.get("message_id") or "")
-                      if isinstance(receipt, Mapping) and pending.transport == "qq" else "")
+        message_id = str(receipt.get("message_id") or "") if isinstance(receipt, Mapping) else ""
         if self._pending_choices.get(key) is not pending:
-            self._recall_menu(message_id)
+            if pending.transport == "qq":
+                self._recall_menu(message_id)
             return False
-        self._recall_menu(pending.menu_id)
+        if pending.transport == "qq":
+            self._recall_menu(pending.menu_id)
         pending.menu_id = message_id
         if pending.expiry is None:
             pending.created = time.monotonic()
@@ -452,8 +461,11 @@ class MusicPlugin(MaiBotPlugin):
             try:
                 if await self.ctx.send.custom("music", {"type": song.platform, "id": card_id}, stream_id):
                     return True
-            except Exception:
-                self.ctx.logger.warning("平台音乐卡片不可用，改发歌曲链接")
+            except NotImplementedError:
+                self.ctx.logger.warning("Host 不支持平台音乐卡片，改发歌曲链接")
+            except Exception as exc:
+                self.ctx.logger.warning("音乐卡片投递结果未知，等待用户明确改发")
+                raise MusicCardDeliveryUnknown() from exc
         return await self._send_song_link(song, stream_id, fallback=True)
 
     def _format_results(self, pending: PendingSelection) -> str:
@@ -558,7 +570,7 @@ class MusicPlugin(MaiBotPlugin):
                     if identity not in seen:
                         seen.add(identity)
                         metadata = tuple(" ".join(value.casefold().split()) for value in
-                                         (song.name, song.artists, song.album))
+                                         (song.title or song.name, song.artists, song.album))
                         can_group = self.config.music.group_cross_platform_results and all(metadata)
                         previous = recordings.get(metadata) if can_group else None
                         if previous is not None and pending.results[previous - 1].platform != song.platform:
@@ -660,6 +672,7 @@ class MusicPlugin(MaiBotPlugin):
         sent = False
         completed = False
         switched = False
+        unconfirmed = False
         try:
             if alternate is None:
                 sent = await self._send_song(song, stream_id, mode=mode, silent=True)
@@ -671,6 +684,9 @@ class MusicPlugin(MaiBotPlugin):
                     if sent:
                         song, switched = alternate, True
             completed = True
+        except MusicCardDeliveryUnknown:
+            completed = True
+            unconfirmed = True
         finally:
             async with self._pending_lock:
                 pending.busy = False
@@ -683,9 +699,11 @@ class MusicPlugin(MaiBotPlugin):
                             del self._recent_selections[oldest]
                     if len(self._recent_selections) < 256:
                         self._recent_selections[key] = RecentSelection(song)
-                    if sent:
+                    if sent or unconfirmed:
                         self._drop_pending(key)
                 self._clean_expired_pending()
+        if unconfirmed:
+            return False, str(MusicCardDeliveryUnknown())
         kind = {"voice": "语音", "card": "标准卡片或回退链接", "link": "歌曲链接"}[mode]
         followup = "\n💡 回复「链接」或「卡片」可改发这首歌" if key in self._recent_selections else ""
         if sent:
@@ -694,8 +712,8 @@ class MusicPlugin(MaiBotPlugin):
             return True, f"已发送{kind}{note}\n🎵 {song.display()}{followup if mode == 'voice' else ''}"
         if key not in self._pending_choices:
             hint = followup or " 请重新点歌。"
-            return False, f"「{song.name}」发送未成功，列表已过期。{hint}"
-        return False, f"「{song.name}」发送未成功，已保留候选。\n🔁 回复 {index} 重试{followup}"
+            return False, f"「{song.title or song.name}」发送未成功，列表已过期。{hint}"
+        return False, f"「{song.title or song.name}」发送未成功，已保留候选。\n🔁 回复 {index} 重试{followup}"
 
     @Tool("search_and_play_music", description=(
         "搜索音乐并列出候选，等待用户选歌。可指定音乐平台、歌手和本次发送方式；"
@@ -754,13 +772,15 @@ class MusicPlugin(MaiBotPlugin):
             await self.ctx.send.text(f"⚠️ {result}", stream_id)
         return ok, result, True
 
-    def _queue_numeric_selection(self, stream_id: str, user_id: str, text: str) -> bool:
+    def _queue_numeric_selection(self, stream_id: str, user_id: str, text: str, *, reply_to: str | None = None) -> bool:
         if not re.fullmatch(r"[0-9]{1,3}", text.strip()):
             return False
         self._clean_expired_pending()
         key = (stream_id, user_id)
         pending = self._pending_choices.get(key)
         if pending is None or not pending.results:
+            return False
+        if reply_to is not None and (not pending.menu_id or reply_to != pending.menu_id):
             return False
         if pending.queued or pending.busy:
             return True
@@ -803,7 +823,9 @@ class MusicPlugin(MaiBotPlugin):
                         if pending is not None and self._pending_choices.get(key) is pending:
                             self._drop_pending(key)
                 elif self._recent_selections.get(key) is recent:
-                    await self.ctx.send.text(f"⚠️ 「{recent.song.name}」改发未成功", stream_id)
+                    await self.ctx.send.text(f"⚠️ 「{recent.song.title or recent.song.name}」改发未成功", stream_id)
+            except MusicCardDeliveryUnknown as exc:
+                await self.ctx.send.text(f"⚠️ {exc}", stream_id)
             except Exception:
                 self.ctx.logger.exception("改发歌曲失败")
             finally:
@@ -1013,7 +1035,15 @@ class MusicPlugin(MaiBotPlugin):
         info = message.get("message_info")
         user = info.get("user_info") if isinstance(info, Mapping) else None
         user_id = str(user.get("user_id") or "") if isinstance(user, Mapping) else ""
-        if user_id and (self._queue_numeric_selection(session_id, user_id, text)
+        reply_to = message.get("reply_to")
+        reply_to = str(reply_to) if reply_to is not None and reply_to != "" else None
+        if reply_to is None:
+            for segment in message.get("raw_message", []) if isinstance(message.get("raw_message"), list) else []:
+                if isinstance(segment, Mapping) and segment.get("type") == "reply":
+                    data = segment.get("data")
+                    reply_to = str(data.get("id") or "") if isinstance(data, Mapping) else ""
+                    break
+        if user_id and (self._queue_numeric_selection(session_id, user_id, text, reply_to=reply_to)
                         or self._queue_recent_delivery(session_id, user_id, text)):
             return {"action": "abort"}
         card = parse_music_card_text(text) if self.config.music.auto_parse_card else None
@@ -1038,6 +1068,9 @@ class MusicPlugin(MaiBotPlugin):
                     continue
                 sent = await self._send_song(song, session_id)
                 return {"action": "abort" if sent else "continue"}
+            except MusicCardDeliveryUnknown:
+                await self.ctx.send.text("⚠️ 音乐卡片投递结果未知，请先查看聊天。需要链接时请用点歌命令选择链接模式。", session_id)
+                return {"action": "abort"}
             except Exception as exc:
                 self.ctx.logger.warning("分享歌曲解析失败: platform=%s error=%s", platform, type(exc).__name__)
                 return {"action": "continue"}

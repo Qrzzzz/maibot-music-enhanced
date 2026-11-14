@@ -73,6 +73,22 @@ async def test_qq_detail_preserves_standard_card_id_separately_from_mid():
 
 
 @pytest.mark.asyncio
+async def test_qq_native_search_and_detail_keep_version_title_and_base_name():
+    client = make_client()
+    tracks = [{"mid": mid, "name": "Song", "title": title,
+               "singer": [{"name": "Artist"}], "album": {"name": "Album"}}
+              for mid, title in [("live-mid", "Song (Live)"), ("studio-mid", "Song")]]
+    client._qq_client.post.return_value = FakeResponse({"code": 0, "req_1": {"code": 0,
+        "data": {"body": {"song": {"list": tracks}}}}})
+    songs = await client.search_qq("Song")
+    assert [(s.song_id, s.name) for s in songs] == [("live-mid", "Song"), ("studio-mid", "Song")]
+    assert "Song (Live)" in songs[0].display() and "Live" not in songs[1].display()
+    client._qq_client.post.return_value = FakeResponse({"req_0": {"data": {"track_info": tracks[0]}}})
+    detail = await client.get_qq_song_detail("live-mid")
+    assert detail.name == "Song" and "Song (Live)" in detail.display()
+
+
+@pytest.mark.asyncio
 async def test_qq_client_uses_configured_login_cookie() -> None:
     client = MusicSearchClient(
         qq_cookie={

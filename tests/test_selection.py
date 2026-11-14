@@ -293,6 +293,122 @@ async def test_failed_card_and_link_are_not_reported_as_success():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [TimeoutError, ConnectionError, RuntimeError])
+async def test_uncertain_card_delivery_waits_for_explicit_link_request(failure):
+    p, _, songs = setup()
+    p._send_song = types.MethodType(module.MusicPlugin._send_song, p)
+    p.ctx.send.custom.side_effect = failure("receipt unavailable")
+    await search(p, send_mode="card")
+    p.ctx.send.text.reset_mock()
+    ok, result = await p._selection_action("group", "alice", "select", index=2)
+    assert not ok and "投递结果未知" in result and "回复「链接」" in result
+    assert "重试" not in result
+    p.ctx.send.text.assert_not_awaited()
+    assert ("group", "alice") not in p._pending_choices
+    assert p._recent_selections[("group", "alice")].song is songs[1]
+    assert p._queue_recent_delivery("group", "alice", "链接")
+    await asyncio.gather(*p._menu_tasks)
+    p.ctx.send.custom.assert_awaited_once()
+    assert "songDetail/101" in p.ctx.send.text.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_explicitly_unsupported_card_can_still_fall_back_to_link():
+    p = plugin()
+    p.ctx.send.custom.side_effect = NotImplementedError
+    song = module.SongInfo("123", "Song", "Artist", "", "163")
+    assert await p._send_song(song, "group", mode="card")
+    assert "https://music.163.com/song?id=123" in p.ctx.send.text.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_uncertain_followup_card_does_not_automatically_send_link():
+    p, _, _ = setup()
+    await search(p)
+    assert (await p._selection_action("group", "alice", "select", index=1))[0]
+    p._send_song = types.MethodType(module.MusicPlugin._send_song, p)
+    p.ctx.send.custom.side_effect = TimeoutError
+    p.ctx.send.text.reset_mock()
+    assert p._queue_recent_delivery("group", "alice", "卡片")
+    await asyncio.gather(*p._menu_tasks)
+    assert p.ctx.send.text.await_count == 1
+    assert "投递结果未知" in p.ctx.send.text.await_args.args[0]
+    assert "https://" not in p.ctx.send.text.await_args.args[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reply", ["old", "other", "current", None, "raw_old", "raw_current", "raw_unknown"])
+async def test_numeric_reply_only_selects_the_referenced_current_menu(reply):
+    p, _, songs = setup()
+    config = p.get_default_config()
+    config["music"]["auto_recall_selection"] = False
+    p.set_plugin_config(config)
+    p.ctx.send.text.return_value = {"sent": True, "message_id": "101"}
+    await search(p)
+    p.ctx.send.text.return_value = {"sent": True, "message_id": "102"}
+    await search(p)
+    message = {"session_id": "group", "processed_plain_text": "1",
+               "message_info": {"user_info": {"user_id": "alice"}}}
+    if reply and reply.startswith("raw_"):
+        message["raw_message"] = [{"type": "reply", "data": {} if reply == "raw_unknown" else
+                                  {"id": "101" if reply == "raw_old" else "102"}}]
+    elif reply:
+        message["reply_to"] = {"old": "101", "other": "999", "current": "102"}[reply]
+    accepted = reply in {None, "current", "raw_current"}
+    assert await p.handle_music_url_parse(message=message) == {"action": "abort" if accepted else "continue"}
+    await asyncio.gather(*p._menu_tasks)
+    if accepted:
+        p._send_song.assert_awaited_once_with(songs[0], "group", mode="voice", silent=True)
+    else:
+        p._send_song.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_numeric_reply_after_pagination_or_without_receipt():
+    p, _, _ = setup(7)
+    p.ctx.send.text.return_value = {"sent": True, "message_id": "101"}
+    await search(p)
+    p.ctx.send.text.return_value = {"sent": True, "message_id": "102"}
+    assert (await p._selection_action("group", "alice", "next"))[0]
+    assert not p._queue_numeric_selection("group", "alice", "1", reply_to="101")
+    p.ctx.send.text.return_value = True
+    assert (await p._selection_action("group", "alice", "previous"))[0]
+    assert not p._queue_numeric_selection("group", "alice", "1", reply_to="102")
+    assert p._queue_numeric_selection("group", "alice", "1")
+    await asyncio.gather(*p._menu_tasks)
+
+
+@pytest.mark.asyncio
+async def test_numeric_reply_to_old_source_menu_is_rejected():
+    p, _, _ = setup()
+    config = p.get_default_config()
+    config["music"]["auto_recall_selection"] = False
+    p.set_plugin_config(config)
+    p.ctx.send.text.return_value = {"sent": True, "message_id": "101"}
+    await search(p)
+    p.ctx.send.text.return_value = {"sent": True, "message_id": "102"}
+    assert (await p._selection_action("group", "alice", "source", music_platform="163"))[0]
+    assert not p._queue_numeric_selection("group", "alice", "1", reply_to="101")
+    assert p._queue_numeric_selection("group", "alice", "1", reply_to="102")
+    await asyncio.gather(*p._menu_tasks)
+
+
+@pytest.mark.asyncio
+async def test_native_version_titles_are_not_grouped_with_different_recordings():
+    p, api, songs = setup(1)
+    songs[0].title = songs[0].name + " (Live)"
+    studio = module.SongInfo("400", songs[0].name, "Artist", "Album", "163")
+    api.search.side_effect = [songs, [studio]]
+    assert (await p._do_search_and_send("Song", "auto", "group", user_id="alice"))[0]
+    menu = p.ctx.send.text.await_args.args[0]
+    assert "(Live)" in menu
+    assert p._pending_choices[("group", "alice")].results == [songs[0], studio]
+    p._send_song.return_value = False
+    ok, result = await p._selection_action("group", "alice", "select", index=1)
+    assert not ok and "(Live)" in result
+
+
+@pytest.mark.asyncio
 async def test_link_override_does_not_mutate_config_or_prepare_audio():
     p = plugin()
     p._get_api = Mock(side_effect=AssertionError("Link must not download audio"))
